@@ -51,9 +51,19 @@ _NO_MATCHING_DEVICES = "No matching devices found"
 
 
 def run_command(args: Sequence[str], cwd: Path) -> CommandResult:
+    environment = os.environ.copy()
+    environment.update(
+        {
+            "LC_ALL": "C.UTF-8",
+            "LANG": "C.UTF-8",
+            "SOURCE_DATE_EPOCH": "0",
+            "TZ": "UTC",
+        }
+    )
     completed = subprocess.run(
         args,
         cwd=cwd,
+        env=environment,
         check=False,
         capture_output=True,
         text=True,

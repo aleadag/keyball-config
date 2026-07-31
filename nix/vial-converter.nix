@@ -148,6 +148,10 @@ stdenvNoCC.mkDerivation {
     runHook preInstall
     install -Dm644 bin/VialToKeymapDrawer.n "$out/libexec/VialToKeymapDrawer.n"
     install -Dm755 ${wrapper} "$out/bin/vial-converter"
+    install -Dm644 ${keyball39Geometry} \
+      "$out/share/keyball-geometry/qmk_firmware/keyboards/keyball/keyball39/info.json"
+    install -Dm644 ${keyball44Geometry} \
+      "$out/share/keyball-geometry/qmk_firmware/keyboards/keyball/keyball44/info.json"
     wrapProgram "$out/bin/vial-converter" \
       --set VIAL_CONVERTER_PROGRAM "$out/libexec/VialToKeymapDrawer.n"
     runHook postInstall

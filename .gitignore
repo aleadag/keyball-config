@@ -7,3 +7,6 @@
 .beads/interactions.jsonl
 # bd worktree
 .worktrees/keyball-config/
+
+# Generated keymap diagrams and intermediate site files
+/build/

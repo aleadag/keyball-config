@@ -1,21 +1,31 @@
 from __future__ import annotations
 
+from contextlib import redirect_stdout
+import io
 import json
 from dataclasses import replace
 from itertools import product
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
 import tempfile
+from typing import Sequence
 import unittest
 import warnings
 
+from keyball_config.backup import CommandResult
+from keyball_config.cli import main
 from keyball_config.devices import load_registry
 from keyball_config.keymap import (
+    RenderError,
+    RenderTools,
     load_and_validate_vil,
     normalized_vil,
     reachable_layers,
+    render_backup,
+    render_present,
 )
 from keyball_config.vitaly_v6_keycodes import (
     BASIC_KEYCODES,
@@ -26,6 +36,7 @@ from keyball_config.vitaly_v6_keycodes import (
 
 
 FIXTURES = Path(__file__).parent / "fixtures" / "vial"
+CONVERTER_FIXTURES = Path(__file__).parent / "fixtures" / "converter"
 
 
 def fixture_vil(layers: dict[int, list[str]]) -> dict[str, object]:
@@ -591,6 +602,402 @@ class NormalizationTests(unittest.TestCase):
             with self.subTest(layers=layers):
                 with self.assertRaisesRegex(ValueError, "layers"):
                     normalized_vil(vil, layers)
+
+
+class FakeRenderRunner:
+    def __init__(
+        self,
+        *,
+        svg: bytes | None = b'<svg xmlns="http://www.w3.org/2000/svg"/>\n',
+        converter_yaml: str | None = None,
+    ) -> None:
+        self.svg = svg
+        self.converter_yaml = converter_yaml
+        self.calls: list[tuple[tuple[str, ...], Path]] = []
+        self.converter_inputs: list[bytes] = []
+        self.keymap_inputs: list[bytes] = []
+        self.geometry_inputs: list[bytes] = []
+
+    def __call__(self, args: Sequence[str], cwd: Path) -> CommandResult:
+        command = tuple(str(arg) for arg in args)
+        self.calls.append((command, cwd))
+        if command[0].endswith("vial-converter"):
+            source = Path(command[command.index("--input") + 1])
+            output = Path(command[command.index("--output") + 1])
+            self.converter_inputs.append(source.read_bytes())
+            if self.converter_yaml is not None:
+                output.write_text(self.converter_yaml)
+                return CommandResult(0, "converted\n", "")
+            vil = json.loads(source.read_text())
+            lines = [f'layout: {{"qmk_info_json":"unused"}}', "layers:"]
+            for layer_index, layer in enumerate(vil["layout"]):
+                lines.append(f"  L{layer_index}:")
+                for keycode in (key for row in layer for key in row):
+                    lines.append("    - " + json.dumps(keycode))
+            if len(layer[0]) == 7:
+                lines.extend(
+                    (
+                        "combos:",
+                        '  - {"k":"Mouse1","l":["L0"],"p":[46,45]}',
+                    )
+                )
+            output.write_text("\n".join(lines) + "\n")
+            return CommandResult(0, "converted\n", "")
+        if command[0].endswith("keymap"):
+            source = Path(command[-1])
+            output = Path(command[command.index("-o") + 1])
+            self.keymap_inputs.append(source.read_bytes())
+            self.geometry_inputs.append(
+                Path(command[command.index("-j") + 1]).read_bytes()
+            )
+            if self.svg is not None:
+                output.write_bytes(self.svg)
+            return CommandResult(0, "", "")
+        raise AssertionError(command)
+
+
+class RenderingTests(unittest.TestCase):
+    def setUp(self) -> None:
+        self.models = load_registry(Path("config/models.json"))
+        self.tools = RenderTools(
+            converter=Path("/tools/vial-converter"),
+            keymap=Path("/tools/keymap"),
+            geometry_root=CONVERTER_FIXTURES,
+        )
+
+    def test_both_models_render_twice_byte_identically(self) -> None:
+        for slug in ("keyball39", "keyball44"):
+            with self.subTest(slug=slug), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                runner = FakeRenderRunner()
+                source = CONVERTER_FIXTURES / f"{slug}.vil"
+                first = root / "first.svg"
+                second = root / "second.svg"
+
+                render_backup(source, first, self.models[slug], self.tools, runner)
+                render_backup(source, second, self.models[slug], self.tools, runner)
+
+                self.assertEqual(first.read_bytes(), second.read_bytes())
+                self.assertEqual(runner.keymap_inputs[0], runner.keymap_inputs[1])
+                self.assertEqual(runner.converter_inputs[0], runner.converter_inputs[1])
+
+    def test_sparse_placeholder_layers_are_not_rendered(self) -> None:
+        runner = FakeRenderRunner()
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "keyball44.svg"
+            render_backup(
+                CONVERTER_FIXTURES / "keyball44.vil",
+                output,
+                self.models["keyball44"],
+                self.tools,
+                runner,
+            )
+
+        yaml_text = runner.keymap_inputs[0].decode()
+        self.assertIn("  L0:", yaml_text)
+        self.assertIn("  L3:", yaml_text)
+        self.assertNotIn("  L1:", yaml_text)
+        self.assertNotIn("  L2:", yaml_text)
+
+    def test_canonical_combo_position_46_is_rebased_to_left_ball_geometry(self) -> None:
+        runner = FakeRenderRunner()
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "keyball44.svg"
+            render_backup(
+                CONVERTER_FIXTURES / "keyball44.vil",
+                output,
+                self.models["keyball44"],
+                self.tools,
+                runner,
+            )
+
+        yaml_text = runner.keymap_inputs[0].decode()
+        self.assertNotIn('"p":[46,45]', yaml_text)
+        self.assertIn('"p":[31,32]', yaml_text)
+        geometry = json.loads(runner.geometry_inputs[0])
+        labels = [
+            key["label"]
+            for key in geometry["layouts"]["LAYOUT_no_ball"]["layout"]
+        ]
+        self.assertEqual(len(labels), 44)
+        self.assertNotIn("L32", labels)
+        self.assertNotIn("L33", labels)
+
+    def test_missing_or_malformed_svg_preserves_existing_output(self) -> None:
+        bad_outputs = (None, b"", b"not xml", b"<html/>")
+        for generated in bad_outputs:
+            with self.subTest(generated=generated), tempfile.TemporaryDirectory() as directory:
+                output = Path(directory) / "keyball39.svg"
+                output.write_bytes(b"old svg")
+                runner = FakeRenderRunner(svg=generated)
+
+                with self.assertRaises(RenderError):
+                    render_backup(
+                        CONVERTER_FIXTURES / "keyball39.vil",
+                        output,
+                        self.models["keyball39"],
+                        self.tools,
+                        runner,
+                    )
+
+                self.assertEqual(output.read_bytes(), b"old svg")
+                self.assertEqual(
+                    [path.name for path in output.parent.iterdir()], [output.name]
+                )
+
+    def test_malformed_converter_yaml_is_rejected_before_drawing(self) -> None:
+        runner = FakeRenderRunner(converter_yaml="layers:\n  L0: []\n")
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "keyball39.svg"
+            with self.assertRaisesRegex(RenderError, "converter YAML"):
+                render_backup(
+                    CONVERTER_FIXTURES / "keyball39.vil",
+                    output,
+                    self.models["keyball39"],
+                    self.tools,
+                    runner,
+                )
+
+        self.assertEqual(len(runner.calls), 1)
+
+    def test_duplicate_converter_layer_is_rejected(self) -> None:
+        keys = "\n".join('    - "KC_A"' for _ in range(48))
+        runner = FakeRenderRunner(
+            converter_yaml=(
+                'layout: {"qmk_info_json":"unused"}\n'
+                f"layers:\n  L0:\n{keys}\n  L0:\n{keys}\n"
+            )
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(RenderError, "duplicate.*L0"):
+                render_backup(
+                    CONVERTER_FIXTURES / "keyball39.vil",
+                    Path(directory) / "keyball39.svg",
+                    self.models["keyball39"],
+                    self.tools,
+                    runner,
+                )
+
+    def test_malformed_converter_combo_schema_is_rejected(self) -> None:
+        keys = "\n".join('    - "KC_A"' for _ in range(48))
+        malformed = (
+            {"k": "Escape", "l": "L0", "p": [0, 1]},
+            {"k": "Escape", "l": ["L0"], "p": "0,1"},
+            {"k": "Escape", "l": ["L0"], "p": [True, 1]},
+            {"k": "Escape", "l": ["L0"], "p": [0, -1]},
+            {"k": "Escape", "l": ["L9"], "p": [0, 1]},
+            {"k": "Escape", "l": ["L9"], "p": [48, 1]},
+            {"l": ["L0"], "p": [0, 1]},
+            {"k": None, "l": ["L0"], "p": [0, 1]},
+            {"k": "Escape", "l": ["L0"], "p": [0, 1], "unexpected": True},
+            {
+                "k": {"unexpected": []},
+                "l": ["L0"],
+                "p": [0, 1],
+                "unexpected": True,
+            },
+            {"k": {"t": []}, "l": ["L0"], "p": [0, 1]},
+            {"k": {"h": 1}, "l": ["L0"], "p": [0, 1]},
+            {"k": {"s": None}, "l": ["L0"], "p": [0, 1]},
+            {"k": {"type": True}, "l": ["L0"], "p": [0, 1]},
+        )
+        for combo in malformed:
+            with self.subTest(combo=combo), tempfile.TemporaryDirectory() as directory:
+                runner = FakeRenderRunner(
+                    converter_yaml=(
+                        'layout: {"qmk_info_json":"unused"}\n'
+                        f"layers:\n  L0:\n{keys}\ncombos:\n"
+                        f"  - {json.dumps(combo)}\n"
+                    )
+                )
+                with self.assertRaisesRegex(RenderError, "combo"):
+                    render_backup(
+                        CONVERTER_FIXTURES / "keyball39.vil",
+                        Path(directory) / "keyball39.svg",
+                        self.models["keyball39"],
+                        self.tools,
+                        runner,
+                    )
+
+    def test_real_composite_converter_combo_key_is_accepted(self) -> None:
+        keys = "\n".join('    - "KC_A"' for _ in range(48))
+        combo = {
+            "k": {"t": "Escape", "h": "", "s": "Shift", "type": "held"},
+            "l": ["L0"],
+            "p": [0, 1],
+        }
+        runner = FakeRenderRunner(
+            converter_yaml=(
+                'layout: {"qmk_info_json":"unused"}\n'
+                f"layers:\n  L0:\n{keys}\ncombos:\n"
+                f"  - {json.dumps(combo)}\n"
+            )
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            render_backup(
+                CONVERTER_FIXTURES / "keyball39.vil",
+                Path(directory) / "keyball39.svg",
+                self.models["keyball39"],
+                self.tools,
+                runner,
+            )
+
+        self.assertIn(b'"h":""', runner.keymap_inputs[0])
+
+    def test_converter_layer_requires_exact_electrical_matrix_size(self) -> None:
+        keys = "\n".join('    - "KC_A"' for _ in range(42))
+        runner = FakeRenderRunner(
+            converter_yaml=(
+                'layout: {"qmk_info_json":"unused"}\n'
+                f"layers:\n  L0:\n{keys}\n"
+            )
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(RenderError, "electrical matrix.*48"):
+                render_backup(
+                    CONVERTER_FIXTURES / "keyball39.vil",
+                    Path(directory) / "keyball39.svg",
+                    self.models["keyball39"],
+                    self.tools,
+                    runner,
+                )
+
+    def test_tool_start_failure_is_reported_as_render_error(self) -> None:
+        def unavailable(args: Sequence[str], cwd: Path) -> CommandResult:
+            raise OSError("tool is unavailable")
+
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(RenderError, "converter.*unavailable"):
+                render_backup(
+                    CONVERTER_FIXTURES / "keyball39.vil",
+                    Path(directory) / "keyball39.svg",
+                    self.models["keyball39"],
+                    self.tools,
+                    unavailable,
+                )
+
+    def test_render_present_defaults_to_all_and_model_filter_is_diagnostic(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory) / "repo"
+            repo.mkdir()
+            for slug in self.models:
+                (repo / f"{slug}.vil").write_bytes(
+                    (CONVERTER_FIXTURES / f"{slug}.vil").read_bytes()
+                )
+            output = Path(directory) / "build"
+
+            rendered = render_present(
+                repo, output, self.models, self.tools, FakeRenderRunner()
+            )
+            only = render_present(
+                repo,
+                output,
+                self.models,
+                self.tools,
+                FakeRenderRunner(),
+                only_model="keyball39",
+            )
+
+            self.assertEqual(
+                [path.name for path in rendered],
+                ["keyball39.svg", "keyball44.svg"],
+            )
+            self.assertEqual([path.name for path in only], ["keyball39.svg"])
+
+    def test_render_present_requires_a_backup_and_known_present_model(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory) / "repo"
+            repo.mkdir()
+            output = Path(directory) / "build"
+            with self.assertRaisesRegex(RenderError, "no supported backups"):
+                render_present(
+                    repo, output, self.models, self.tools, FakeRenderRunner()
+                )
+            with self.assertRaisesRegex(RenderError, "unknown model"):
+                render_present(
+                    repo,
+                    output,
+                    self.models,
+                    self.tools,
+                    FakeRenderRunner(),
+                    only_model="keyball61",
+                )
+
+    def test_cli_render_defaults_to_all_and_accepts_diagnostic_model(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repo = Path(directory) / "repo"
+            repo.mkdir()
+            for slug in self.models:
+                (repo / f"{slug}.vil").write_bytes(
+                    (CONVERTER_FIXTURES / f"{slug}.vil").read_bytes()
+                )
+            stdout = io.StringIO()
+            with redirect_stdout(stdout):
+                result = main(
+                    ("render", "--output", "build"),
+                    repo=repo,
+                    registry_path=Path("config/models.json"),
+                    runner=FakeRenderRunner(),
+                    render_tools=self.tools,
+                )
+            with redirect_stdout(io.StringIO()):
+                diagnostic = main(
+                    ("render", "--output", "build", "--model", "keyball39"),
+                    repo=repo,
+                    registry_path=Path("config/models.json"),
+                    runner=FakeRenderRunner(),
+                    render_tools=self.tools,
+                )
+
+            self.assertEqual(result, 0)
+            self.assertEqual(diagnostic, 0)
+            self.assertEqual(
+                stdout.getvalue().splitlines(),
+                [
+                    str(repo / "build" / "keyball39.svg"),
+                    str(repo / "build" / "keyball44.svg"),
+                ],
+            )
+
+
+class RealRenderingIntegrationTests(unittest.TestCase):
+    @unittest.skipUnless(
+        shutil.which("vial-converter") and shutil.which("keymap"),
+        "pinned render tools are not on PATH",
+    )
+    def test_pinned_tools_render_both_fixtures_byte_identically(self) -> None:
+        converter = Path(shutil.which("vial-converter") or "")
+        geometry_root = converter.resolve().parent.parent / "share" / "keyball-geometry"
+        if not geometry_root.is_dir():
+            self.skipTest("packaged Keyball geometry is not available")
+        tools = RenderTools(
+            converter=converter,
+            keymap=Path(shutil.which("keymap") or ""),
+            geometry_root=geometry_root,
+        )
+        models = load_registry(Path("config/models.json"))
+        from keyball_config.backup import run_command
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for slug in ("keyball39", "keyball44"):
+                first = root / f"{slug}-first.svg"
+                second = root / f"{slug}-second.svg"
+                render_backup(
+                    CONVERTER_FIXTURES / f"{slug}.vil",
+                    first,
+                    models[slug],
+                    tools,
+                    run_command,
+                )
+                render_backup(
+                    CONVERTER_FIXTURES / f"{slug}.vil",
+                    second,
+                    models[slug],
+                    tools,
+                    run_command,
+                )
+                self.assertEqual(first.read_bytes(), second.read_bytes())
 
 
 if __name__ == "__main__":

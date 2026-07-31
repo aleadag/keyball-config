@@ -1,12 +1,16 @@
 from __future__ import annotations
 
 import copy
+from dataclasses import dataclass
 from itertools import product
 import json
+import os
 from pathlib import Path
 import re
+import tempfile
 from typing import Mapping, Sequence
 import warnings
+import xml.etree.ElementTree as ET
 
 from keyball_config.devices import ModelConfig
 from keyball_config.vitaly_v6_keycodes import (
@@ -59,6 +63,398 @@ _MODEL_PROTOCOLS = {
     "keyball39": (1, 6, 9),
     "keyball44": (1, 6, 9),
 }
+
+
+@dataclass(frozen=True)
+class RenderTools:
+    converter: Path
+    keymap: Path
+    geometry_root: Path
+
+
+class RenderError(RuntimeError):
+    """A backup could not be converted into a fresh, valid SVG."""
+
+
+def render_backup(
+    source: Path,
+    output_svg: Path,
+    model: ModelConfig,
+    tools: RenderTools,
+    runner,
+) -> None:
+    try:
+        vil = load_and_validate_vil(source, model)
+        selected_layers = reachable_layers(vil, model.include_layers)
+        positions = _physical_positions(model, vil)
+        geometry = _filtered_geometry(
+            tools.geometry_root / model.geometry_path, positions
+        )
+    except (OSError, ValueError) as error:
+        raise RenderError(str(error)) from error
+
+    output_svg.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(
+        prefix=f".{model.slug}-render-", dir=output_svg.parent
+    ) as directory:
+        temporary = Path(directory)
+        normalized_input = temporary / f"{model.slug}.vil"
+        converter_yaml = temporary / "converter.yaml"
+        normalized_yaml = temporary / f"{model.slug}.yaml"
+        geometry_path = temporary / f"{model.slug}-geometry.json"
+        rendered_svg = temporary / f"{model.slug}.svg"
+        normalized_input.write_bytes(normalized_vil(vil, selected_layers))
+        geometry_path.write_bytes(geometry)
+
+        converter_result = _run_render_command(
+            "converter",
+            runner,
+            (
+                str(tools.converter),
+                *model.converter_args,
+                "--geometry",
+                str(tools.geometry_root / model.geometry_path),
+                "--input",
+                str(normalized_input),
+                "--output",
+                str(converter_yaml),
+            ),
+            source.parent,
+        )
+        _require_render_command("converter", converter_result)
+        try:
+            converted = converter_yaml.read_text()
+        except OSError as error:
+            raise RenderError(f"converter did not create YAML: {error}") from error
+        if not converted:
+            raise RenderError("converter created empty YAML")
+        normalized_yaml.write_bytes(
+            _normalize_converter_yaml(
+                converted,
+                selected_layers,
+                positions,
+                len(vil["layout"][0]) * len(vil["layout"][0][0]),
+            )
+        )
+
+        keymap_result = _run_render_command(
+            "keymap-drawer",
+            runner,
+            (
+                str(tools.keymap),
+                "draw",
+                "-j",
+                str(geometry_path),
+                "-o",
+                str(rendered_svg),
+                str(normalized_yaml),
+            ),
+            temporary,
+        )
+        _require_render_command("keymap-drawer", keymap_result)
+        _validate_svg(rendered_svg)
+        os.replace(rendered_svg, output_svg)
+
+
+def render_present(
+    repo: Path,
+    output: Path,
+    models: Mapping[str, ModelConfig],
+    tools: RenderTools,
+    runner,
+    only_model: str | None = None,
+) -> tuple[Path, ...]:
+    if only_model is not None and only_model not in models:
+        raise RenderError(f"unknown model: {only_model}")
+    selected = [models[only_model]] if only_model is not None else [
+        models[slug] for slug in sorted(models)
+    ]
+    present = [model for model in selected if (repo / model.backup_filename).is_file()]
+    if not present:
+        if only_model is not None:
+            raise RenderError(f"backup is missing for model: {only_model}")
+        raise RenderError("no supported backups are present")
+
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix=".keyball-render-", dir=output.parent) as directory:
+        staging = Path(directory)
+        for model in present:
+            render_backup(
+                repo / model.backup_filename,
+                staging / f"{model.slug}.svg",
+                model,
+                tools,
+                runner,
+            )
+        output.mkdir(parents=True, exist_ok=True)
+        rendered: list[Path] = []
+        for model in present:
+            target = output / f"{model.slug}.svg"
+            os.replace(staging / target.name, target)
+            rendered.append(target)
+    return tuple(rendered)
+
+
+def _require_render_command(name: str, result) -> None:
+    if result.returncode != 0 or result.stderr:
+        detail = result.stderr.strip() or result.stdout.strip() or f"exit {result.returncode}"
+        raise RenderError(f"{name} failed: {detail}")
+
+
+def _run_render_command(name: str, runner, args: Sequence[str], cwd: Path):
+    try:
+        return runner(args, cwd)
+    except OSError as error:
+        raise RenderError(f"cannot start {name}: {error}") from error
+
+
+def _physical_positions(
+    model: ModelConfig, vil: Mapping[str, object]
+) -> tuple[tuple[str, int], ...]:
+    layout = vil["layout"]
+    assert isinstance(layout, list)
+    columns = len(layout[0][0])
+    coordinates: list[tuple[str, int, int]] = []
+    if model.slug == "keyball44" and columns in (6, 7):
+        for row in range(3):
+            coordinates.extend(
+                (f"L{row}{column}", row, column) for column in range(6)
+            )
+            coordinates.extend(
+                (f"R{row}{column}", row + 4, column)
+                for column in range(5, -1, -1)
+            )
+        left_columns = (1, 2, 3, 4, 5) if columns == 6 else (1, 2, 3, 5, 6)
+        right_columns = (5, 4, 3, 2, 1) if columns == 6 else (6, 5, 4, 3, 2)
+        coordinates.extend(
+            (f"L3{index + 1}", 3, column)
+            for index, column in enumerate(left_columns)
+        )
+        coordinates.extend(
+            (f"R3{5 - index}", 7, column)
+            for index, column in enumerate(right_columns)
+        )
+        optional = (("L32", "L33"), ("R32", "R33"))
+    elif model.slug == "keyball39" and columns == 6:
+        for row in range(3):
+            coordinates.extend((f"L{row}{column}", row, column) for column in range(5))
+            coordinates.extend(
+                (f"R{row}{column}", row + 4, column)
+                for column in range(4, -1, -1)
+            )
+        coordinates.extend((f"L3{column}", 3, column) for column in range(6))
+        coordinates.extend(
+            (f"R3{column}", 7, column) for column in range(5, -1, -1)
+        )
+        optional = (
+            ("L31", "L32", "L33"),
+            ("R31", "R32", "R33"),
+        )
+    else:
+        raise ValueError(
+            f"no reviewed physical ordering for {model.slug} {columns} columns"
+        )
+
+    absent_labels = {
+        label
+        for group in optional
+        if all(_label_is_unused(layout, coordinates, label) for label in group)
+        for label in group
+    }
+    return tuple(
+        (label, row * columns + column)
+        for label, row, column in coordinates
+        if label not in absent_labels
+    )
+
+
+def _label_is_unused(
+    layout: list[object], coordinates: Sequence[tuple[str, int, int]], label: str
+) -> bool:
+    row, column = next(
+        (row, column) for candidate, row, column in coordinates if candidate == label
+    )
+    return all(layer[row][column] == "KC_NO" for layer in layout)
+
+
+def _filtered_geometry(path: Path, positions: Sequence[tuple[str, int]]) -> bytes:
+    try:
+        geometry = json.loads(path.read_text())
+        physical = geometry["layouts"]["LAYOUT_no_ball"]["layout"]
+        by_label = {entry["label"]: entry for entry in physical}
+    except (OSError, json.JSONDecodeError, KeyError, TypeError) as error:
+        raise ValueError(f"invalid pinned geometry {path}: {error}") from error
+    labels = [label for label, _ in positions]
+    if len(by_label) != len(physical) or any(label not in by_label for label in labels):
+        raise ValueError(
+            f"pinned geometry labels do not match reviewed {path.stem} ordering"
+        )
+    geometry["layouts"] = {
+        "LAYOUT_no_ball": {"layout": [by_label[label] for label in labels]}
+    }
+    return (
+        json.dumps(geometry, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+        + "\n"
+    ).encode()
+
+
+def _normalize_converter_yaml(
+    text: str,
+    selected_layers: Sequence[int],
+    positions: Sequence[tuple[str, int]],
+    expected_key_count: int,
+) -> bytes:
+    layers, combos = _parse_converter_yaml(text)
+    selected_names = [f"L{index}" for index in selected_layers]
+    if any(name not in layers for name in selected_names):
+        raise RenderError("converter YAML is missing a selected layer")
+    selected_indices = [index for _, index in positions]
+    old_to_new = {old: new for new, old in enumerate(selected_indices)}
+    lines = [
+        "layout: {}",
+        "layers:",
+    ]
+    if any(
+        len(values) != expected_key_count for values in layers.values()
+    ):
+        raise RenderError(
+            "converter YAML layer does not match electrical matrix size "
+            f"{expected_key_count}"
+        )
+    for name in selected_names:
+        lines.append(f"  {name}:")
+        lines.extend(f"    - {layers[name][index]}" for index in selected_indices)
+
+    normalized_combos = []
+    for combo in combos:
+        if any(name not in layers for name in combo["l"]):
+            raise RenderError("converter combo references an undeclared layer")
+        if any(position >= expected_key_count for position in combo["p"]):
+            raise RenderError("converter combo position exceeds electrical matrix")
+        combo_layers = [name for name in combo.get("l", []) if name in selected_names]
+        if not combo_layers:
+            continue
+        try:
+            key_positions = [old_to_new[position] for position in combo["p"]]
+        except (KeyError, TypeError) as error:
+            raise RenderError("converter combo references a non-physical key") from error
+        normalized = dict(combo)
+        normalized["l"] = combo_layers
+        normalized["p"] = key_positions
+        normalized_combos.append(normalized)
+    if normalized_combos:
+        lines.append("combos:")
+        lines.extend(
+            "  - "
+            + json.dumps(combo, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+            for combo in normalized_combos
+        )
+    return ("\n".join(lines) + "\n").encode()
+
+
+def _parse_converter_yaml(text: str) -> tuple[dict[str, list[str]], list[dict[str, object]]]:
+    lines = text.splitlines()
+    if len(lines) < 2 or not lines[0].startswith("layout: ") or lines[1] != "layers:":
+        raise RenderError("malformed converter YAML header")
+    layers: dict[str, list[str]] = {}
+    combos: list[dict[str, object]] = []
+    current: list[str] | None = None
+    section = "layers"
+    for line in lines[2:]:
+        layer_match = re.fullmatch(r"  (L\d+):", line)
+        if layer_match and section == "layers":
+            name = layer_match.group(1)
+            if name in layers:
+                raise RenderError(f"duplicate converter layer: {name}")
+            current = []
+            layers[name] = current
+        elif line == "combos:":
+            section = "combos"
+            current = None
+        elif (
+            section == "layers"
+            and line.startswith("    - ")
+            and current is not None
+        ):
+            value = line[6:]
+            _validate_yaml_value(value)
+            current.append(value)
+        elif section == "combos" and line.startswith("  - "):
+            try:
+                combo = json.loads(line[4:])
+            except json.JSONDecodeError as error:
+                raise RenderError("malformed converter combo") from error
+            if not isinstance(combo, dict):
+                raise RenderError("malformed converter combo")
+            _validate_converter_combo(combo)
+            combos.append(combo)
+        elif line:
+            raise RenderError(f"unsupported converter YAML line: {line!r}")
+    if not layers or any(not values for values in layers.values()):
+        raise RenderError("converter YAML contains no complete layers")
+    return layers, combos
+
+
+def _validate_converter_combo(combo: Mapping[str, object]) -> None:
+    if set(combo) != {"k", "l", "p"}:
+        raise RenderError("malformed converter combo: expected only k, l, and p")
+    key = combo["k"]
+    if isinstance(key, str):
+        valid_key = bool(key)
+    elif isinstance(key, dict):
+        valid_key = (
+            bool(key)
+            and set(key) <= {"t", "h", "s", "type"}
+            and all(isinstance(value, str) for value in key.values())
+        )
+    else:
+        valid_key = False
+    if not valid_key:
+        raise RenderError("malformed converter combo: k must be a key value")
+    layers = combo["l"]
+    if (
+        not isinstance(layers, list)
+        or not layers
+        or any(
+            not isinstance(layer, str) or re.fullmatch(r"L\d+", layer) is None
+            for layer in layers
+        )
+    ):
+        raise RenderError("malformed converter combo: l must be a list of layers")
+    positions = combo["p"]
+    if (
+        not isinstance(positions, list)
+        or len(positions) < 2
+        or any(
+            not isinstance(position, int)
+            or isinstance(position, bool)
+            or position < 0
+            for position in positions
+        )
+    ):
+        raise RenderError(
+            "malformed converter combo: p must contain non-negative positions"
+        )
+
+
+def _validate_yaml_value(value: str) -> None:
+    if re.fullmatch(r"[A-Za-z_][A-Za-z0-9_+ -]*", value):
+        return
+    try:
+        json.loads(value)
+    except json.JSONDecodeError as error:
+        raise RenderError(f"malformed converter key value: {value!r}") from error
+
+
+def _validate_svg(path: Path) -> None:
+    try:
+        if path.is_symlink() or not path.is_file() or path.stat().st_size == 0:
+            raise RenderError("keymap-drawer did not create a non-empty SVG")
+        root = ET.parse(path).getroot()
+    except (OSError, ET.ParseError) as error:
+        raise RenderError(f"keymap-drawer created malformed SVG: {error}") from error
+    if root.tag.rsplit("}", 1)[-1] != "svg":
+        raise RenderError("keymap-drawer output root is not SVG")
 
 
 def load_and_validate_vil(path: Path, model: ModelConfig) -> dict[str, object]:

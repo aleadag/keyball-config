@@ -9,8 +9,9 @@ import stat
 import tempfile
 from typing import Callable, Sequence
 import unittest
+from unittest.mock import patch
 
-from keyball_config.backup import BackupError, CommandResult, backup
+from keyball_config.backup import BackupError, CommandResult, backup, run_command
 from keyball_config.cli import main
 
 
@@ -134,6 +135,27 @@ class FakeRunner:
             )
             return CommandResult(0, stdout, "")
         raise AssertionError(f"unexpected command: {command!r}")
+
+
+class CommandEnvironmentTests(unittest.TestCase):
+    def test_runner_sets_complete_deterministic_locale_and_time_environment(self) -> None:
+        ambient = {
+            "LANG": "zh_CN.UTF-8",
+            "LC_ALL": "fr_FR.UTF-8",
+            "TZ": "Asia/Shanghai",
+            "SOURCE_DATE_EPOCH": "1234",
+        }
+        with patch.dict(os.environ, ambient), patch(
+            "keyball_config.backup.subprocess.run",
+            return_value=CommandResult(0, "", ""),
+        ) as invoked:
+            run_command(("example",), Path("."))
+
+        environment = invoked.call_args.kwargs["env"]
+        self.assertEqual(environment["LC_ALL"], "C.UTF-8")
+        self.assertEqual(environment["LANG"], "C.UTF-8")
+        self.assertEqual(environment["TZ"], "UTC")
+        self.assertEqual(environment["SOURCE_DATE_EPOCH"], "0")
 
 
 class BackupTests(unittest.TestCase):
