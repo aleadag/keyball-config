@@ -169,5 +169,5 @@ runtime model override; detection remains registry-driven and fail closed.
 - Keyball39 parsing, validation, conversion, geometry, and site behavior are
   covered by fixtures, but physical Keyball39 hardware has not been verified;
   see the [device fixture note](tests/fixtures/devices/README.md).
-- The GitHub Actions workflow is linted and policy-tested locally, but an actual
-  GitHub Pages deployment has not been verified from this repository.
+- The GitHub Actions workflow is linted and policy-tested locally, and the
+  deployed GitHub Pages site has been verified from this repository.
