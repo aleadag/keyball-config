@@ -445,6 +445,20 @@ class ValidationTests(unittest.TestCase):
         self.assertEqual(vil["version"], 1)
         self.assertEqual(len(vil["layout"]), 2)
 
+    def test_keyball39_eight_by_six_fixture_loads(self) -> None:
+        model = load_registry(Path("config/models.json"))["keyball39"]
+
+        vil = load_and_validate_vil(FIXTURES / "valid-keyball39.vil", model)
+
+        self.assertEqual(len(vil["layout"]), 1)
+        self.assertEqual((len(vil["layout"][0]), len(vil["layout"][0][0])), (8, 6))
+
+    def test_keyball39_rejects_observed_keyball44_eight_by_seven_shape(self) -> None:
+        model = load_registry(Path("config/models.json"))["keyball39"]
+
+        with self.assertRaisesRegex(ValueError, "matrix shape.*keyball39"):
+            load_and_validate_vil(Path("keyball44.vil"), model)
+
     def test_real_backup_validates_without_geometry_assumptions(self) -> None:
         model = replace(self.model, geometry_path="not-a-physical-layout.json")
 

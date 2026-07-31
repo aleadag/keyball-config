@@ -16,6 +16,7 @@ class ModelConfig:
     geometry_path: str
     converter_args: tuple[str, ...]
     page_label: str
+    matrix_shapes: tuple[tuple[int, int], ...]
     include_layers: tuple[int, ...]
 
 
@@ -122,6 +123,8 @@ def select_device(
 
 
 def _parse_model(slug: str, entry: dict[str, object]) -> ModelConfig:
+    if re.fullmatch(r"[a-z0-9][a-z0-9_-]*", slug) is None:
+        raise ValueError(f"model registry has invalid slug {slug!r}")
     required_strings = (
         "slug",
         "backup_filename",
@@ -135,6 +138,19 @@ def _parse_model(slug: str, entry: dict[str, object]) -> ModelConfig:
     if entry["slug"] != slug:
         raise ValueError(f"model registry key {slug!r} does not match its slug")
 
+    backup_filename = str(entry["backup_filename"])
+    if (
+        backup_filename != f"{slug}.vil"
+        or Path(backup_filename).is_absolute()
+        or Path(backup_filename).name != backup_filename
+        or "/" in backup_filename
+        or "\\" in backup_filename
+        or backup_filename.startswith(":")
+    ):
+        raise ValueError(
+            f"model {slug!r} backup_filename must be the repo-root file {slug}.vil"
+        )
+
     geometry_path = str(entry["geometry_path"])
     geometry = Path(geometry_path)
     if geometry.is_absolute() or ".." in geometry.parts:
@@ -142,6 +158,7 @@ def _parse_model(slug: str, entry: dict[str, object]) -> ModelConfig:
 
     name_tokens = _string_tuple(entry.get("name_tokens"), slug, "name_tokens")
     converter_args = _string_tuple(entry.get("converter_args"), slug, "converter_args")
+    matrix_shapes = _matrix_shapes(entry.get("matrix_shapes"), slug)
     include_layers = entry.get("include_layers")
     if not isinstance(include_layers, list) or any(
         not isinstance(layer, int) or isinstance(layer, bool) or layer < 0
@@ -151,12 +168,13 @@ def _parse_model(slug: str, entry: dict[str, object]) -> ModelConfig:
 
     return ModelConfig(
         slug=slug,
-        backup_filename=str(entry["backup_filename"]),
+        backup_filename=backup_filename,
         name_tokens=name_tokens,
         model_number=str(entry["model_number"]),
         geometry_path=geometry_path,
         converter_args=converter_args,
         page_label=str(entry["page_label"]),
+        matrix_shapes=matrix_shapes,
         include_layers=tuple(include_layers),
     )
 
@@ -167,6 +185,28 @@ def _string_tuple(value: object, slug: str, field: str) -> tuple[str, ...]:
     ):
         raise ValueError(f"model {slug!r} has invalid {field}")
     return tuple(value)
+
+
+def _matrix_shapes(value: object, slug: str) -> tuple[tuple[int, int], ...]:
+    if not isinstance(value, list) or not value:
+        raise ValueError(f"model {slug!r} has invalid matrix_shapes")
+    shapes: list[tuple[int, int]] = []
+    for shape in value:
+        if (
+            not isinstance(shape, list)
+            or len(shape) != 2
+            or any(
+                not isinstance(dimension, int)
+                or isinstance(dimension, bool)
+                or dimension <= 0
+                for dimension in shape
+            )
+        ):
+            raise ValueError(f"model {slug!r} has invalid matrix_shapes")
+        shapes.append((shape[0], shape[1]))
+    if len(set(shapes)) != len(shapes):
+        raise ValueError(f"model {slug!r} has duplicate matrix_shapes")
+    return tuple(shapes)
 
 
 def _matches_model(product_name: str, model: ModelConfig) -> bool:

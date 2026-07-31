@@ -96,7 +96,12 @@ def load_and_validate_vil(path: Path, model: ModelConfig) -> dict[str, object]:
                 f"{expected_shape[0]} rows and {expected_shape[1]} columns"
             )
 
+    assert expected_shape is not None
     _validate_optional_structures(raw)
+    if expected_shape not in model.matrix_shapes:
+        raise ValueError(
+            f"matrix shape {expected_shape} is not allowed for {model.slug}"
+        )
     return raw
 
 

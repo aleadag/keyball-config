@@ -7,6 +7,7 @@
     "geometry_path": "qmk_firmware/keyboards/keyball/keyball39/info.json",
     "converter_args": ["--model", "keyball39"],
     "page_label": "Keyball39",
+    "matrix_shapes": [[8, 6]],
     "include_layers": []
   },
   "keyball44": {
@@ -17,6 +18,7 @@
     "geometry_path": "qmk_firmware/keyboards/keyball/keyball44/info.json",
     "converter_args": ["--model", "keyball44"],
     "page_label": "Keyball44",
+    "matrix_shapes": [[8, 6], [8, 7]],
     "include_layers": []
   }
 }

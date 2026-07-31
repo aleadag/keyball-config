@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
+import tempfile
 import unittest
 
 from keyball_config.devices import load_registry, parse_devices, select_device
@@ -18,6 +20,42 @@ class DeviceTests(unittest.TestCase):
         for model in self.models.values():
             self.assertFalse(Path(model.geometry_path).is_absolute())
             self.assertNotIn("/nix/store/", model.geometry_path)
+
+    def test_registry_contains_reviewed_electrical_matrix_shapes(self) -> None:
+        self.assertEqual(self.models["keyball39"].matrix_shapes, ((8, 6),))
+        self.assertEqual(self.models["keyball44"].matrix_shapes, ((8, 6), (8, 7)))
+
+    def test_registry_rejects_noncanonical_backup_filenames(self) -> None:
+        raw = json.loads(Path("config/models.json").read_text())
+        invalid_names = (
+            "other.vil",
+            "../keyball44.vil",
+            "/tmp/keyball44.vil",
+            ":(glob)keyball*.vil",
+            "subdir/keyball44.vil",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            registry = Path(directory) / "models.json"
+            for filename in invalid_names:
+                with self.subTest(filename=filename):
+                    candidate = json.loads(json.dumps(raw))
+                    candidate["keyball44"]["backup_filename"] = filename
+                    registry.write_text(json.dumps(candidate))
+                    with self.assertRaisesRegex(ValueError, "backup_filename"):
+                        load_registry(registry)
+
+    def test_registry_rejects_invalid_matrix_shapes(self) -> None:
+        raw = json.loads(Path("config/models.json").read_text())
+        invalid_shapes = ([], [[8]], [[8, 0]], [[True, 6]], [[8, 6], [8, 6]])
+        with tempfile.TemporaryDirectory() as directory:
+            registry = Path(directory) / "models.json"
+            for shapes in invalid_shapes:
+                with self.subTest(shapes=shapes):
+                    candidate = json.loads(json.dumps(raw))
+                    candidate["keyball44"]["matrix_shapes"] = shapes
+                    registry.write_text(json.dumps(candidate))
+                    with self.assertRaisesRegex(ValueError, "matrix_shapes"):
+                        load_registry(registry)
 
     def test_zero_records_fail_closed(self) -> None:
         with self.assertRaisesRegex(ValueError, "no compatible devices"):
