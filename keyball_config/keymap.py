@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import copy
+from itertools import product
 import json
 from pathlib import Path
 import re
@@ -8,94 +9,50 @@ from typing import Mapping, Sequence
 import warnings
 
 from keyball_config.devices import ModelConfig
+from keyball_config.vitaly_v6_keycodes import (
+    BASIC_KEYCODES,
+    STANDARD_ATOMIC_KEYCODES,
+)
 
 
-_LAYER_ACTIONS = {"MO", "LT", "TG", "TO", "DF", "OSL"}
+_LAYER_ACTIONS = {"MO", "LT", "TG", "TO", "DF", "PDF", "OSL", "LM", "TT"}
 _KEYBALL_NON_LAYER_KEYCODES = {
     *(f"QK_KB_{index}" for index in range(10)),
     *(f"QK_KB_{index}" for index in range(11, 17)),
 }
 _KNOWN_WRAPPERS = {
-    "A",
-    "C",
-    "G",
     "HYPR",
     "LALT",
+    "LAG",
+    "LCA",
     "LCAG",
     "LCTL",
     "LGUI",
+    "LSA",
+    "LSG",
     "LSFT",
     "MEH",
-    "MT",
-    "OSM",
     "RALT",
+    "RAG",
+    "RCS",
     "RCTL",
     "RGUI",
+    "RSA",
+    "RSG",
     "RSFT",
-    "S",
 }
-_KNOWN_ATOMIC_KEYCODES = {
-    "_______",
-    "XXXXXXX",
-    *(f"KC_{value}" for value in "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"),
-    *(f"KC_F{value}" for value in range(1, 12)),
-    "KC_APPLICATION",
-    "KC_BACKSLASH",
-    "KC_BACKSPACE",
-    "KC_COMMA",
-    "KC_DELETE",
-    "KC_DOT",
-    "KC_DOWN",
-    "KC_END",
-    "KC_ENTER",
-    "KC_EQUAL",
-    "KC_ESCAPE",
-    "KC_GRAVE",
-    "KC_HOME",
-    "KC_INTERNATIONAL_1",
-    "KC_KP_ASTERISK",
-    "KC_KP_MINUS",
-    "KC_KP_PLUS",
-    "KC_KP_SLASH",
-    "KC_LANGUAGE_1",
-    "KC_LEFT",
-    "KC_LEFT_ALT",
-    "KC_LEFT_BRACKET",
-    "KC_LEFT_CTRL",
-    "KC_LEFT_GUI",
-    "KC_LEFT_SHIFT",
-    "KC_MINUS",
-    "KC_NO",
-    "KC_PAGE_DOWN",
-    "KC_PAGE_UP",
-    "KC_PRINT_SCREEN",
-    "KC_QUOTE",
-    "KC_RIGHT",
-    "KC_RIGHT_BRACKET",
-    "KC_SEMICOLON",
-    "KC_SLASH",
-    "KC_SPACE",
-    "KC_TAB",
-    "KC_TRANSPARENT",
-    "KC_TRNS",
-    "KC_UP",
-    "MOD_LALT",
-    "MOD_LCTL",
-    "MOD_LGUI",
-    "MOD_LSFT",
-    "MOD_RALT",
-    "MOD_RCTL",
-    "MOD_RGUI",
-    "MOD_RSFT",
-    "QK_MACRO_0",
-    "QK_MOUSE_BUTTON_1",
-    "QK_MOUSE_BUTTON_2",
-    "QK_MOUSE_BUTTON_3",
-    "QK_MOUSE_BUTTON_4",
-    "QK_MOUSE_CURSOR_DOWN",
-    "QK_MOUSE_CURSOR_LEFT",
-    "QK_MOUSE_CURSOR_RIGHT",
-    "QK_MOUSE_CURSOR_UP",
+_VALID_MODIFIERS = {"KC_NO"} | {
+    "|".join(
+        name
+        for name, enabled in zip(
+            (f"MOD_{side}CTL", f"MOD_{side}SFT", f"MOD_{side}ALT", f"MOD_{side}GUI"),
+            mask,
+        )
+        if enabled
+    )
+    for side in ("L", "R")
+    for mask in product((False, True), repeat=4)
+    if any(mask)
 }
 _CALL = re.compile(r"(?P<name>[A-Z][A-Z0-9_]*)\((?P<arguments>.*)\)")
 _MODEL_PROTOCOLS = {
@@ -383,28 +340,55 @@ def _layer_targets(keycode: str, path: str):
     if name in _LAYER_ACTIONS:
         yield from _layer_action_targets(name, arguments, keycode, path)
         return
+    if name in _KNOWN_WRAPPERS:
+        if len(arguments) == 1 and arguments[0] in BASIC_KEYCODES:
+            return
+        _warn_invalid_keycode(keycode, path)
+    elif name == "OSM":
+        if len(arguments) == 1 and arguments[0] in _VALID_MODIFIERS:
+            return
+        _warn_invalid_keycode(keycode, path)
+    elif name == "MT":
+        if (
+            len(arguments) == 2
+            and arguments[0] in _VALID_MODIFIERS
+            and arguments[1] in BASIC_KEYCODES
+        ):
+            return
+        _warn_invalid_keycode(keycode, path)
     elif name == "TD":
-        nested = ()
-    elif name in _KNOWN_WRAPPERS:
-        nested = arguments
+        if len(arguments) == 1 and _canonical_number(arguments[0], 255):
+            return
+        _warn_invalid_keycode(keycode, path)
     else:
         _warn_unknown(keycode, path)
-        nested = arguments
-    for index, argument in enumerate(nested):
-        yield from _layer_targets(argument.strip(), f"{path}:{name}[{index}]")
+    for index, argument in enumerate(arguments):
+        candidate = argument.strip()
+        if candidate and candidate not in _VALID_MODIFIERS:
+            yield from _layer_targets(candidate, f"{path}:{name}[{index}]")
 
 
 def _layer_action_targets(
     name: str, arguments: tuple[str, ...], keycode: str, path: str
 ):
-    expected_arity = 2 if name == "LT" else 1
-    has_layer = bool(arguments) and arguments[0].strip().isdigit()
-    valid_tap_key = (
-        name != "LT"
+    expected_arity = 2 if name in {"LT", "LM"} else 1
+    max_layer = 15 if name in {"LT", "LM"} else 31
+    has_layer = bool(arguments) and arguments[0].isdigit()
+    valid_layer = has_layer and _canonical_number(arguments[0], max_layer)
+    valid_second_argument = (
+        name not in {"LT", "LM"}
         or len(arguments) == 2
-        and _known_atomic_keycode(arguments[1].strip())
+        and (
+            arguments[1] in BASIC_KEYCODES
+            if name == "LT"
+            else arguments[1] in _VALID_MODIFIERS
+        )
     )
-    if len(arguments) == expected_arity and has_layer and valid_tap_key:
+    if (
+        len(arguments) == expected_arity
+        and valid_layer
+        and valid_second_argument
+    ):
         yield int(arguments[0])
         return
 
@@ -421,7 +405,11 @@ def _layer_action_targets(
 
 
 def _known_atomic_keycode(keycode: str) -> bool:
-    return keycode in _KNOWN_ATOMIC_KEYCODES
+    return keycode in STANDARD_ATOMIC_KEYCODES
+
+
+def _canonical_number(value: str, maximum: int) -> bool:
+    return value.isdigit() and str(int(value)) == value and int(value) <= maximum
 
 
 def _split_arguments(value: str) -> tuple[str, ...] | None:
@@ -458,6 +446,15 @@ def _warn_unknown(keycode: str, path: str) -> None:
 def _warn_invalid_action(keycode: str, path: str) -> None:
     warnings.warn(
         f"invalid layer action {keycode!r} at {path}; review whether it "
+        "changes layers and add any hidden target to the model include_layers",
+        UserWarning,
+        stacklevel=3,
+    )
+
+
+def _warn_invalid_keycode(keycode: str, path: str) -> None:
+    warnings.warn(
+        f"invalid Vial keycode {keycode!r} at {path}; review whether it "
         "changes layers and add any hidden target to the model include_layers",
         UserWarning,
         stacklevel=3,

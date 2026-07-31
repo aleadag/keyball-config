@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import json
 from dataclasses import replace
+from itertools import product
 from pathlib import Path
 import re
+import subprocess
+import sys
 import tempfile
 import unittest
 import warnings
@@ -13,6 +16,12 @@ from keyball_config.keymap import (
     load_and_validate_vil,
     normalized_vil,
     reachable_layers,
+)
+from keyball_config.vitaly_v6_keycodes import (
+    BASIC_KEYCODES,
+    STANDARD_ATOMIC_KEYCODES,
+    VITALY_COMMIT,
+    VITALY_VERSION,
 )
 
 
@@ -197,11 +206,8 @@ class ReachabilityTests(unittest.TestCase):
             {
                 0: [
                     "KC_A",
-                    "KC_TRNS",
                     "KC_TRANSPARENT",
                     "KC_NO",
-                    "_______",
-                    "XXXXXXX",
                     "QK_MOUSE_BUTTON_1",
                     "TD(0)",
                 ]
@@ -213,6 +219,220 @@ class ReachabilityTests(unittest.TestCase):
             self.assertEqual(reachable_layers(vil), (0,))
 
         self.assertEqual(caught, [])
+
+    def test_vitaly_canonical_f12_and_caps_lock_are_quiet(self) -> None:
+        vil = fixture_vil({0: ["KC_F12", "KC_CAPS_LOCK"]})
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            self.assertEqual(reachable_layers(vil), (0,))
+
+        self.assertEqual(caught, [])
+
+    def test_every_vitaly_layer_form_adds_its_target(self) -> None:
+        vil = fixture_vil(
+            {
+                0: [
+                    "TO(1)",
+                    "MO(2)",
+                    "DF(3)",
+                    "PDF(4)",
+                    "TG(5)",
+                    "OSL(6)",
+                    "LM(7,MOD_LCTL)",
+                    "TT(8)",
+                    "LT(9,KC_F12)",
+                ],
+                9: [],
+            }
+        )
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            self.assertEqual(reachable_layers(vil), tuple(range(10)))
+
+        self.assertEqual(caught, [])
+
+    def test_representative_vitaly_non_layer_composites_are_quiet(self) -> None:
+        vil = fixture_vil(
+            {
+                0: [
+                    "LCTL(KC_F12)",
+                    "RSG(KC_CAPS_LOCK)",
+                    "OSM(MOD_LCTL|MOD_LSFT)",
+                    "MT(MOD_RALT|MOD_RGUI,KC_ENTER)",
+                    "TD(255)",
+                ]
+            }
+        )
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            self.assertEqual(reachable_layers(vil), (0,))
+
+        self.assertEqual(caught, [])
+
+    def test_noncanonical_and_custom_vitaly_values_warn(self) -> None:
+        for keycode in (
+            "KC_MY_LAYER_SWITCH",
+            "QK_KB_17",
+            "QK_USER_0",
+            "0x7e20",
+            "KC_CAPSLOCK",
+        ):
+            with self.subTest(keycode=keycode):
+                vil = fixture_vil({0: [keycode]})
+                with self.assertWarnsRegex(
+                    UserWarning,
+                    rf"{re.escape(keycode)}.*layout\[0\]\[0\]\[0\].*include_layers",
+                ):
+                    self.assertEqual(reachable_layers(vil), (0,))
+
+    def test_every_vitaly_standard_atomic_keycode_is_quiet(self) -> None:
+        vil = fixture_vil({0: sorted(STANDARD_ATOMIC_KEYCODES)})
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            self.assertEqual(reachable_layers(vil), (0,))
+
+        self.assertEqual(caught, [])
+
+    def test_every_vitaly_basic_keycode_is_a_valid_lt_tap_argument(self) -> None:
+        vil = fixture_vil({0: [f"LT(0,{keycode})" for keycode in BASIC_KEYCODES]})
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            self.assertEqual(reachable_layers(vil), (0,))
+
+        self.assertEqual(caught, [])
+
+    def test_every_vitaly_modifier_wrapper_is_quiet(self) -> None:
+        wrappers = (
+            "LCTL",
+            "LSFT",
+            "LALT",
+            "LGUI",
+            "RCTL",
+            "RSFT",
+            "RALT",
+            "RGUI",
+            "HYPR",
+            "MEH",
+            "LCAG",
+            "LSG",
+            "LAG",
+            "RSG",
+            "RAG",
+            "LCA",
+            "LSA",
+            "RSA",
+            "RCS",
+        )
+        vil = fixture_vil({0: [f"{wrapper}(KC_A)" for wrapper in wrappers]})
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            self.assertEqual(reachable_layers(vil), (0,))
+
+        self.assertEqual(caught, [])
+
+    def test_every_vitaly_modifier_combination_is_valid(self) -> None:
+        modifiers = {"KC_NO"}
+        for side in ("L", "R"):
+            names = tuple(f"MOD_{side}{name}" for name in ("CTL", "SFT", "ALT", "GUI"))
+            modifiers.update(
+                "|".join(name for name, enabled in zip(names, mask) if enabled)
+                for mask in product((False, True), repeat=4)
+                if any(mask)
+            )
+        vil = fixture_vil(
+            {
+                0: [
+                    *(f"OSM({mods})" for mods in modifiers),
+                    *(f"MT({mods},KC_A)" for mods in modifiers),
+                ]
+            }
+        )
+
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always")
+            self.assertEqual(reachable_layers(vil), (0,))
+
+        self.assertEqual(caught, [])
+
+    def test_mixed_side_modifier_combinations_warn(self) -> None:
+        keycode = "OSM(MOD_RCTL|MOD_LSFT)"
+        vil = fixture_vil({0: [keycode]})
+
+        with self.assertWarnsRegex(UserWarning, re.escape(keycode)):
+            self.assertEqual(reachable_layers(vil), (0,))
+
+    def test_vitaly_input_only_composite_aliases_warn(self) -> None:
+        for keycode in ("C(KC_A)", "LT1(KC_A)"):
+            with self.subTest(keycode=keycode):
+                vil = fixture_vil({0: [keycode]})
+                with self.assertWarnsRegex(UserWarning, re.escape(keycode)):
+                    self.assertEqual(reachable_layers(vil), (0,))
+
+    def test_invalid_composite_inner_custom_keycode_is_traversed(self) -> None:
+        vil = fixture_vil({0: ["LCTL(QK_KB_10)"], 1: []})
+
+        with self.assertWarnsRegex(
+            UserWarning, r"LCTL\(QK_KB_10\).*layout\[0\]\[0\]\[0\]"
+        ):
+            self.assertEqual(reachable_layers(vil), (0, 1))
+
+
+class VitalyVocabularyGeneratorTests(unittest.TestCase):
+    def test_generated_vocabulary_has_pinned_provenance_and_expected_sets(self) -> None:
+        self.assertEqual(VITALY_VERSION, "0.1.32")
+        self.assertEqual(VITALY_COMMIT, "7ba52b0cf121e411434adcebf111e54b0ee470eb")
+        self.assertEqual(len(STANDARD_ATOMIC_KEYCODES), 656)
+        self.assertEqual(len(BASIC_KEYCODES), 220)
+        self.assertIn("KC_F12", BASIC_KEYCODES)
+        self.assertIn("KC_CAPS_LOCK", BASIC_KEYCODES)
+        self.assertNotIn("QK_KB_0", STANDARD_ATOMIC_KEYCODES)
+        self.assertNotIn("QK_USER_0", STANDARD_ATOMIC_KEYCODES)
+
+    def test_generator_writes_and_checks_a_reproducible_module(self) -> None:
+        source_text = """\
+pub static FULLNAMES: LazyLock<HashMap<u16, &str>> = LazyLock::new(|| {
+    let mut m = HashMap::new();
+    m.insert(0x0000, "KC_NO");
+    m.insert(0x0045, "KC_F12");
+    m.insert(0x7E00, "QK_KB_0");
+    m.insert(0x7E40, "QK_USER_0");
+    m
+});
+"""
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory) / "code_to_name.rs"
+            output = Path(directory) / "vitaly_v6_keycodes.py"
+            source.write_text(source_text)
+            command = [
+                sys.executable,
+                "scripts/generate_vitaly_v6_keycodes.py",
+                "--source",
+                str(source),
+                "--output",
+                str(output),
+            ]
+
+            generated = subprocess.run(command, capture_output=True, text=True)
+            self.assertEqual(generated.returncode, 0, generated.stderr)
+            contents = output.read_text()
+            self.assertIn(
+                'VITALY_COMMIT = "7ba52b0cf121e411434adcebf111e54b0ee470eb"',
+                contents,
+            )
+            self.assertIn('0x0045: "KC_F12"', contents)
+            self.assertNotIn("QK_KB_0", contents)
+            self.assertNotIn("QK_USER_0", contents)
+
+            checked = subprocess.run(
+                [*command, "--check"], capture_output=True, text=True
+            )
+            self.assertEqual(checked.returncode, 0, checked.stderr)
 
 
 class ValidationTests(unittest.TestCase):
