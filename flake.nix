@@ -12,6 +12,7 @@
       vitaly = pkgs.callPackage ./nix/vitaly.nix { };
       vialConverter = pkgs.callPackage ./nix/vial-converter.nix { };
       python = pkgs.python3;
+      testPython = python.withPackages (packages: [ packages.pyyaml ]);
       keymap = pkgs.keymap-drawer;
 
       sourceRoots = [
@@ -114,7 +115,7 @@
       unitTests =
         pkgs.runCommand "keyball-config-unit-tests"
           {
-            nativeBuildInputs = [ python ];
+            nativeBuildInputs = [ testPython ];
           }
           ''
             export LC_ALL=C.UTF-8
@@ -122,8 +123,8 @@
             export TZ=UTC
             export SOURCE_DATE_EPOCH=0
             cd ${projectSource}
-            ${lib.getExe python} -m unittest discover -s tests -v
-            ${lib.getExe python} scripts/generate_vitaly_v6_keycodes.py \
+            ${lib.getExe testPython} -m unittest discover -s tests -v
+            ${lib.getExe testPython} scripts/generate_vitaly_v6_keycodes.py \
               --source ${vitaly.src.outPath}/src/keycodes/v6/code_to_name.rs \
               --check
             touch "$out"
@@ -182,13 +183,18 @@
       workflowChecks =
         pkgs.runCommand "keyball-config-workflow-checks"
           {
-            nativeBuildInputs = [ pkgs.actionlint ];
+            nativeBuildInputs = [
+              pkgs.actionlint
+              testPython
+            ];
           }
           ''
+            mkdir -p "$TMPDIR/actionlint-project/.git"
+            cp -r ${projectSource}/.github "$TMPDIR/actionlint-project/.github"
+            cd "$TMPDIR/actionlint-project"
+            actionlint
             cd ${projectSource}
-            if test -d .github/workflows; then
-              actionlint
-            fi
+            ${lib.getExe testPython} -m unittest tests.test_workflow -v
             touch "$out"
           '';
     in
@@ -199,7 +205,7 @@
         packages = [
           pkgs.actionlint
           pkgs.git
-          python
+          testPython
           vitaly
           vialConverter
           keymap
