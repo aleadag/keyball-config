@@ -1,5 +1,7 @@
 # Keyball configuration backup and keymap site
 
+[View the rendered keymaps](https://aleadag.github.io/keyball-config/)
+
 This repository keeps canonical Vial settings for supported Keyball keyboards
 and renders their keymaps as a static site. The current registry supports
 Keyball39 and Keyball44 on `x86_64-linux`.
