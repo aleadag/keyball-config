@@ -1,0 +1,3 @@
+Product name: "Keyball 439" id: 12346,
+Manufacturer name: "MCK", id: 16717,
+Release: 1, Serial: "vial:unsupported", Path: "/dev/hidraw5"

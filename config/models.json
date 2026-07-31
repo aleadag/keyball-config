@@ -1,0 +1,22 @@
+{
+  "keyball39": {
+    "slug": "keyball39",
+    "backup_filename": "keyball39.vil",
+    "name_tokens": ["keyball", "trackball"],
+    "model_number": "39",
+    "geometry_path": "qmk_firmware/keyboards/keyball/keyball39/info.json",
+    "converter_args": ["--model", "keyball39"],
+    "page_label": "Keyball39",
+    "include_layers": []
+  },
+  "keyball44": {
+    "slug": "keyball44",
+    "backup_filename": "keyball44.vil",
+    "name_tokens": ["keyball", "trackball"],
+    "model_number": "44",
+    "geometry_path": "qmk_firmware/keyboards/keyball/keyball44/info.json",
+    "converter_args": ["--model", "keyball44"],
+    "page_label": "Keyball44",
+    "include_layers": []
+  }
+}

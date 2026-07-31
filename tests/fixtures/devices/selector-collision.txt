@@ -1,0 +1,6 @@
+Product name: "trackball 44 V3" id: 16718,
+Manufacturer name: "MCK", id: 16717,
+Release: 1, Serial: "vial:f64c2b3c", Path: "/dev/hidraw3"
+Product name: "Unrelated Vial Device" id: 16718,
+Manufacturer name: "MCK", id: 65535,
+Release: 1, Serial: "vial:collision", Path: "/dev/hidraw7"
