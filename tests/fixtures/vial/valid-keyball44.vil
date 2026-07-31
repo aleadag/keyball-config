@@ -1,0 +1,15 @@
+{
+  "alt_repeat_key": [],
+  "combo": [],
+  "key_override": [],
+  "layout": [
+    [["KC_A", "MO(1)"]],
+    [["KC_B", "KC_NO"]]
+  ],
+  "macro": [],
+  "tap_dance": [],
+  "uid": 1,
+  "version": 1,
+  "via_protocol": 9,
+  "vial_protocol": 6
+}
