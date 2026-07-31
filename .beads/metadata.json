@@ -1,0 +1,7 @@
+{
+  "database": "dolt",
+  "backend": "dolt",
+  "dolt_mode": "embedded",
+  "dolt_database": "keyball44",
+  "project_id": "b18d045b-23fd-408a-a643-8bc13f046add"
+}
