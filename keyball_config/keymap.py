@@ -19,6 +19,8 @@ from keyball_config.vitaly_v6_keycodes import (
 )
 
 
+KeySpec = str | dict[str, str]
+
 _LAYER_ACTIONS = {"MO", "LT", "TG", "TO", "DF", "PDF", "OSL", "LM", "TT"}
 _KEYBALL_NON_LAYER_KEYCODES = {
     *(f"QK_KB_{index}" for index in range(10)),
@@ -59,10 +61,285 @@ _VALID_MODIFIERS = {"KC_NO"} | {
     if any(mask)
 }
 _CALL = re.compile(r"(?P<name>[A-Z][A-Z0-9_]*)\((?P<arguments>.*)\)")
+_MODIFIER_LABELS = {
+    "MOD_LCTL": "LCtrl",
+    "MOD_LSFT": "LShift",
+    "MOD_LALT": "LAlt",
+    "MOD_LGUI": "LGui",
+    "MOD_RCTL": "RCtrl",
+    "MOD_RSFT": "RShift",
+    "MOD_RALT": "RAlt",
+    "MOD_RGUI": "RGui",
+}
+_WRAPPER_LABELS = {
+    "LCTL": "LCtrl",
+    "LSFT": "LShift",
+    "LALT": "LAlt",
+    "LGUI": "LGui",
+    "RCTL": "RCtrl",
+    "RSFT": "RShift",
+    "RALT": "RAlt",
+    "RGUI": "RGui",
+    "HYPR": "Hyper",
+    "MEH": "Meh",
+    "LCAG": "LCtrl+LAlt+LGui",
+    "LSG": "LShift+LGui",
+    "LAG": "LAlt+LGui",
+    "RSG": "RShift+RGui",
+    "RAG": "RAlt+RGui",
+    "LCA": "LCtrl+LAlt",
+    "LSA": "LShift+LAlt",
+    "RSA": "RShift+RAlt",
+    "RCS": "RCtrl+RShift",
+}
+_ATOMIC_LABELS = {
+    "KC_NO": "",
+    "KC_TRANSPARENT": "",
+    "KC_TRNS": "",
+    "KC_BACKSPACE": "Bksp",
+    "KC_PAGE_UP": "PgUp",
+    "KC_PAGE_DOWN": "PgDn",
+    "KC_PRINT_SCREEN": "PrtSc",
+    "KC_ESCAPE": "Esc",
+    "KC_DELETE": "Del",
+    "KC_APPLICATION": "Menu",
+    "KC_LEFT_CTRL": "LCtrl",
+    "KC_LEFT_SHIFT": "LShift",
+    "KC_LEFT_ALT": "LAlt",
+    "KC_LEFT_GUI": "LGui",
+    "KC_RIGHT_CTRL": "RCtrl",
+    "KC_RIGHT_SHIFT": "RShift",
+    "KC_RIGHT_ALT": "RAlt",
+    "KC_RIGHT_GUI": "RGui",
+    "KC_MINUS": "-",
+    "KC_EQUAL": "=",
+    "KC_LEFT_BRACKET": "[",
+    "KC_RIGHT_BRACKET": "]",
+    "KC_BACKSLASH": "\\",
+    "KC_SEMICOLON": ";",
+    "KC_QUOTE": "'",
+    "KC_GRAVE": "`",
+    "KC_COMMA": ",",
+    "KC_DOT": ".",
+    "KC_SLASH": "/",
+    "QK_MOUSE_CURSOR_LEFT": "Mouse ←",
+    "QK_MOUSE_CURSOR_RIGHT": "Mouse →",
+    "QK_MOUSE_CURSOR_UP": "Mouse ↑",
+    "QK_MOUSE_CURSOR_DOWN": "Mouse ↓",
+    "QK_MOUSE_WHEEL_LEFT": "Wheel ←",
+    "QK_MOUSE_WHEEL_RIGHT": "Wheel →",
+    "QK_MOUSE_WHEEL_UP": "Wheel ↑",
+    "QK_MOUSE_WHEEL_DOWN": "Wheel ↓",
+    "QK_MOUSE_ACCELERATION_0": "Mouse Accel 0",
+    "QK_MOUSE_ACCELERATION_1": "Mouse Accel 1",
+    "QK_MOUSE_ACCELERATION_2": "Mouse Accel 2",
+    **{f"QK_MOUSE_BUTTON_{index}": f"Mouse {index}" for index in range(1, 9)},
+}
+# Pinned Keyball lib/keyball/keyball.h defines only indices 0–15; 16 is unmapped.
+_KEYBALL_LABELS = dict(
+    enumerate(
+        (
+            "Config Reset",
+            "Config Save",
+            "CPI +100",
+            "CPI -100",
+            "CPI +1000",
+            "CPI -1000",
+            "Scroll Toggle",
+            "Scroll Hold",
+            "Scroll Slower",
+            "Scroll Faster",
+            "Auto Mouse Toggle",
+            "Auto Mouse +50ms",
+            "Auto Mouse -50ms",
+            "Snap Vertical",
+            "Snap Horizontal",
+            "Snap Free",
+        )
+    )
+)
+_SHIFTED_LABELS = {
+    "KC_1": "!",
+    "KC_2": "@",
+    "KC_3": "#",
+    "KC_4": "$",
+    "KC_5": "%",
+    "KC_6": "^",
+    "KC_7": "&",
+    "KC_8": "*",
+    "KC_9": "(",
+    "KC_0": ")",
+    "KC_MINUS": "_",
+    "KC_EQUAL": "+",
+    "KC_LEFT_BRACKET": "{",
+    "KC_RIGHT_BRACKET": "}",
+    "KC_BACKSLASH": "|",
+    "KC_SEMICOLON": ":",
+    "KC_QUOTE": '"',
+    "KC_GRAVE": "~",
+    "KC_COMMA": "<",
+    "KC_DOT": ">",
+    "KC_SLASH": "?",
+}
 _MODEL_PROTOCOLS = {
     "keyball39": (1, 6, 9),
     "keyball44": (1, 6, 9),
 }
+
+
+def _friendly_modifiers(value: str) -> str | None:
+    if value not in _VALID_MODIFIERS:
+        return None
+    if value == "KC_NO":
+        return ""
+    parts = value.split("|")
+    sides = {part[4] for part in parts}
+    if len(sides) != 1:
+        return None
+    return "+".join(_MODIFIER_LABELS[part] for part in parts)
+
+
+def _atomic_label(keycode: str) -> str:
+    if keycode in _ATOMIC_LABELS:
+        return _ATOMIC_LABELS[keycode]
+    match = re.fullmatch(r"QK_KB_(\d+)", keycode)
+    if match and _canonical_number(match[1], 15):
+        return _KEYBALL_LABELS[int(match[1])]
+    if _known_atomic_keycode(keycode) and keycode.startswith("KC_"):
+        return keycode[3:].replace("_", " ").title()
+    return keycode
+
+
+def _tap_text(spec: KeySpec, fallback: str) -> str:
+    if isinstance(spec, str):
+        return spec
+    return spec.get("t", fallback)
+
+
+def _macro_label(keycode: str, vil: Mapping[str, object]) -> str | None:
+    match = re.fullmatch(r"QK_MACRO_(\d+)", keycode)
+    if match is None or not _canonical_number(match[1], 31):
+        return None
+    index = int(match[1])
+    macros = vil.get("macro", [])
+    if not isinstance(macros, list) or index >= len(macros):
+        return f"Macro {index}"
+    macro = macros[index]
+    if (
+        isinstance(macro, list)
+        and len(macro) == 1
+        and macro[0][0] == "text"
+        and isinstance(macro[0][1], str)
+        and 0 < len(macro[0][1]) <= 8
+        and all(character.isprintable() for character in macro[0][1])
+    ):
+        return macro[0][1]
+    return f"Macro {index}"
+
+
+class _TapDanceCycle(Exception):
+    pass
+
+
+def _key_spec(keycode: str, vil: Mapping[str, object]) -> KeySpec:
+    try:
+        return _key_spec_nested(keycode, vil, frozenset(), {})
+    except _TapDanceCycle:
+        return keycode
+
+
+def _key_spec_nested(
+    keycode: str,
+    vil: Mapping[str, object],
+    active_dances: frozenset[str],
+    dance_memo: dict[str, KeySpec],
+) -> KeySpec:
+    if keycode in active_dances:
+        raise _TapDanceCycle
+    if keycode in dance_memo:
+        return dance_memo[keycode]
+    macro = _macro_label(keycode, vil)
+    if macro is not None:
+        return macro
+    call = _CALL.fullmatch(keycode)
+    if call is None:
+        return _atomic_label(keycode)
+    arguments = _split_arguments(call["arguments"])
+    if arguments is None:
+        return keycode
+    name = call["name"]
+    if name == "MT" and len(arguments) == 2:
+        hold = _friendly_modifiers(arguments[0])
+        if hold is not None and arguments[1] in BASIC_KEYCODES:
+            tap = _tap_text(_key_spec(arguments[1], vil), arguments[1])
+            return {"t": tap, "h": hold} if hold else tap
+    if (
+        name == "LT"
+        and len(arguments) == 2
+        and _canonical_number(arguments[0], 15)
+        and arguments[1] in BASIC_KEYCODES
+    ):
+        return {
+            "t": _tap_text(_key_spec(arguments[1], vil), arguments[1]),
+            "h": f"L{arguments[0]}",
+        }
+    if name == "OSM" and len(arguments) == 1:
+        modifier = _friendly_modifiers(arguments[0])
+        if modifier is not None:
+            return {"t": modifier, "h": "one-shot"} if modifier else ""
+    layer_qualifiers = {
+        "MO": "hold",
+        "TG": "toggle",
+        "TO": "switch",
+        "DF": "default",
+        "PDF": "default",
+        "OSL": "one-shot",
+        "TT": "tap-toggle",
+    }
+    if (
+        name in layer_qualifiers
+        and len(arguments) == 1
+        and _canonical_number(arguments[0], 31)
+    ):
+        return {"t": f"L{arguments[0]}", "h": layer_qualifiers[name]}
+    if name == "LM" and len(arguments) == 2 and _canonical_number(arguments[0], 15):
+        modifier = _friendly_modifiers(arguments[1])
+        if modifier is not None:
+            return {"t": f"L{arguments[0]}", "h": modifier or "hold"}
+    if name == "TD" and len(arguments) == 1 and _canonical_number(arguments[0], 255):
+        dances = vil.get("tap_dance", [])
+        index = int(arguments[0])
+        if isinstance(dances, list) and index < len(dances):
+            dance = dances[index]
+            if isinstance(dance, list) and len(dance) == 5:
+                fields = (("t", ""), ("h", ""), ("tr", "2× "), ("br", "T+H "))
+                result: dict[str, str] = {}
+                next_active_dances = active_dances | {keycode}
+                for action, (field, prefix) in zip(dance[:4], fields, strict=True):
+                    if action != "KC_NO":
+                        result[field] = prefix + _tap_text(
+                            _key_spec_nested(
+                                action, vil, next_active_dances, dance_memo
+                            ),
+                            action,
+                        )
+                dance_memo[keycode] = result
+                return result
+    if (
+        name in {"LSFT", "RSFT"}
+        and len(arguments) == 1
+        and arguments[0] in BASIC_KEYCODES
+        and arguments[0] in _SHIFTED_LABELS
+    ):
+        return _SHIFTED_LABELS[arguments[0]]
+    if (
+        name in _WRAPPER_LABELS
+        and len(arguments) == 1
+        and arguments[0] in BASIC_KEYCODES
+    ):
+        inner = _tap_text(_key_spec(arguments[0], vil), arguments[0])
+        return f"{_WRAPPER_LABELS[name]}+{inner}" if inner else _WRAPPER_LABELS[name]
+    return keycode
 
 
 @dataclass(frozen=True)
@@ -131,6 +408,7 @@ def render_backup(
         normalized_yaml.write_bytes(
             _normalize_converter_yaml(
                 converted,
+                vil,
                 selected_layers,
                 positions,
                 len(vil["layout"][0]) * len(vil["layout"][0][0]),
@@ -300,6 +578,7 @@ def _filtered_geometry(path: Path, positions: Sequence[tuple[str, int]]) -> byte
 
 def _normalize_converter_yaml(
     text: str,
+    vil: Mapping[str, object],
     selected_layers: Sequence[int],
     positions: Sequence[tuple[str, int]],
     expected_key_count: int,
@@ -321,16 +600,77 @@ def _normalize_converter_yaml(
             "converter YAML layer does not match electrical matrix size "
             f"{expected_key_count}"
         )
+    layout = vil["layout"]
+    assert isinstance(layout, list)
     for name in selected_names:
+        source_layer = layout[int(name[1:])]
+        assert isinstance(source_layer, list)
+        source_keycodes = [keycode for row in source_layer for keycode in row]
         lines.append(f"  {name}:")
-        lines.extend(f"    - {layers[name][index]}" for index in selected_indices)
+        lines.extend(
+            f"    - {_serialize_key_spec(_key_spec(source_keycodes[index], vil))}"
+            for index in selected_indices
+        )
 
-    normalized_combos = []
+    combo_definitions = _active_combo_definitions(vil)
+    represented_definitions: set[int] = set()
+    seen_definition_layers: set[tuple[int, int]] = set()
+    correlated_combos: list[tuple[dict[str, object], str]] = []
     for combo in combos:
         if any(name not in layers for name in combo["l"]):
             raise RenderError("converter combo references an undeclared layer")
         if any(position >= expected_key_count for position in combo["p"]):
             raise RenderError("converter combo position exceeds electrical matrix")
+        record_triggers: tuple[str, ...] | None = None
+        record_layer_indices: list[int] = []
+        for layer_name in combo["l"]:
+            layer_index = int(layer_name[1:])
+            record_layer_indices.append(layer_index)
+            if layer_index >= len(layout):
+                raise RenderError(
+                    "converter combo layer does not match validated Vial layout"
+                )
+            source_layer = layout[layer_index]
+            assert isinstance(source_layer, list)
+            layer_keycodes = [keycode for row in source_layer for keycode in row]
+            converter_triggers = tuple(
+                layer_keycodes[position] for position in combo["p"]
+            )
+            if record_triggers is None:
+                record_triggers = converter_triggers
+            elif converter_triggers != record_triggers:
+                raise RenderError(
+                    "converter combo declares layers with inconsistent triggers"
+                )
+        assert record_triggers is not None
+        matches = [
+            (index, output_keycode)
+            for index, (source_triggers, output_keycode) in enumerate(
+                combo_definitions
+            )
+            if record_triggers == source_triggers
+        ]
+        if len(matches) != 1:
+            raise RenderError(
+                "converter combo trigger set does not match exactly one validated Vial combo"
+            )
+        definition_index, output_keycode = matches[0]
+        for layer_index in record_layer_indices:
+            definition_layer = (definition_index, layer_index)
+            if definition_layer in seen_definition_layers:
+                raise RenderError(
+                    "converter combo contains a duplicate canonical combo layer record"
+                )
+            seen_definition_layers.add(definition_layer)
+        represented_definitions.add(definition_index)
+        correlated_combos.append((combo, output_keycode))
+    if represented_definitions != set(range(len(combo_definitions))):
+        raise RenderError(
+            "converter combo coverage does not match every validated Vial combo"
+        )
+
+    normalized_combos = []
+    for combo, output_keycode in correlated_combos:
         combo_layers = [name for name in combo.get("l", []) if name in selected_names]
         if not combo_layers:
             continue
@@ -339,6 +679,7 @@ def _normalize_converter_yaml(
         except (KeyError, TypeError) as error:
             raise RenderError("converter combo references a non-physical key") from error
         normalized = dict(combo)
+        normalized["k"] = _key_spec(output_keycode, vil)
         normalized["l"] = combo_layers
         normalized["p"] = key_positions
         normalized_combos.append(normalized)
@@ -352,6 +693,27 @@ def _normalize_converter_yaml(
     return ("\n".join(lines) + "\n").encode()
 
 
+def _active_combo_definitions(
+    vil: Mapping[str, object],
+) -> tuple[tuple[tuple[str, ...], str], ...]:
+    combos = vil.get("combo", [])
+    assert isinstance(combos, list)
+    active = tuple(
+        (tuple(keycode for keycode in entry[:4] if keycode != "KC_NO"), entry[4])
+        for entry in combos
+        if entry[4] != "KC_NO"
+        and sum(keycode != "KC_NO" for keycode in entry[:4]) >= 2
+    )
+    trigger_sets = tuple(tuple(sorted(triggers)) for triggers, _ in active)
+    if len(set(trigger_sets)) != len(trigger_sets):
+        raise RenderError("validated Vial combos contain ambiguous duplicate triggers")
+    return active
+
+
+def _serialize_key_spec(spec: KeySpec) -> str:
+    return json.dumps(spec, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+
+
 def _parse_converter_yaml(text: str) -> tuple[dict[str, list[str]], list[dict[str, object]]]:
     lines = text.splitlines()
     if len(lines) < 2 or not lines[0].startswith("layout: ") or lines[1] != "layers:":
@@ -361,7 +723,7 @@ def _parse_converter_yaml(text: str) -> tuple[dict[str, list[str]], list[dict[st
     current: list[str] | None = None
     section = "layers"
     for line in lines[2:]:
-        layer_match = re.fullmatch(r"  (L\d+):", line)
+        layer_match = re.fullmatch(r"  (L[0-9]+):", line)
         if layer_match and section == "layers":
             name = layer_match.group(1)
             if name in layers:
@@ -416,7 +778,8 @@ def _validate_converter_combo(combo: Mapping[str, object]) -> None:
         not isinstance(layers, list)
         or not layers
         or any(
-            not isinstance(layer, str) or re.fullmatch(r"L\d+", layer) is None
+            not isinstance(layer, str)
+            or re.fullmatch(r"L(?:0|[1-9][0-9]*)", layer) is None
             for layer in layers
         )
     ):

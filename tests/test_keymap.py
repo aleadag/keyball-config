@@ -14,6 +14,7 @@ import tempfile
 from typing import Sequence
 import unittest
 import warnings
+import xml.etree.ElementTree as ET
 
 from keyball_config.backup import CommandResult
 from keyball_config.cli import main
@@ -21,6 +22,9 @@ from keyball_config.devices import load_registry
 from keyball_config.keymap import (
     RenderError,
     RenderTools,
+    _friendly_modifiers,
+    _key_spec,
+    _normalize_converter_yaml,
     load_and_validate_vil,
     normalized_vil,
     reachable_layers,
@@ -37,6 +41,27 @@ from keyball_config.vitaly_v6_keycodes import (
 
 FIXTURES = Path(__file__).parent / "fixtures" / "vial"
 CONVERTER_FIXTURES = Path(__file__).parent / "fixtures" / "converter"
+
+
+def write_keyball44_legend_fixture(target: Path) -> None:
+    vil = json.loads((CONVERTER_FIXTURES / "keyball44.vil").read_text())
+    layer = vil["layout"][0]
+    layer[0][1] = "MT(MOD_LGUI,KC_A)"
+    layer[0][2] = "TD(0)"
+    layer[1][1] = "LT(1,KC_BACKSPACE)"
+    layer[1][2] = "QK_MOUSE_CURSOR_LEFT"
+    layer[1][3] = "KC_PAGE_DOWN"
+    layer[1][4] = "QK_KB_0"
+    layer[1][5] = "QK_KB_15"
+    layer[2][1] = "QK_KB_16"
+    vil["macro"] = [[["text", "=>"]]]
+    vil["tap_dance"] = [
+        ["LSFT(KC_DOT)", "KC_NO", "QK_MACRO_0", "KC_NO", 200]
+    ]
+    target.write_text(
+        json.dumps(vil, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+        + "\n"
+    )
 
 
 def fixture_vil(layers: dict[int, list[str]]) -> dict[str, object]:
@@ -56,6 +81,186 @@ def fixture_vil(layers: dict[int, list[str]]) -> dict[str, object]:
         "macro": [],
         "alt_repeat_key": [],
     }
+
+
+class KeyLegendTests(unittest.TestCase):
+    def test_friendly_atomic_labels(self) -> None:
+        vil = fixture_vil({0: ["KC_A"]})
+        expected = {
+            "KC_BACKSPACE": "Bksp",
+            "KC_PAGE_UP": "PgUp",
+            "KC_PAGE_DOWN": "PgDn",
+            "KC_PRINT_SCREEN": "PrtSc",
+            "KC_LEFT_GUI": "LGui",
+            "KC_RIGHT_CTRL": "RCtrl",
+            "QK_MOUSE_CURSOR_LEFT": "Mouse ←",
+            "QK_MOUSE_CURSOR_RIGHT": "Mouse →",
+            "QK_MOUSE_CURSOR_UP": "Mouse ↑",
+            "QK_MOUSE_CURSOR_DOWN": "Mouse ↓",
+            "QK_MOUSE_WHEEL_UP": "Wheel ↑",
+            "QK_MOUSE_WHEEL_DOWN": "Wheel ↓",
+            "QK_MOUSE_WHEEL_LEFT": "Wheel ←",
+            "QK_MOUSE_WHEEL_RIGHT": "Wheel →",
+            "QK_MOUSE_ACCELERATION_0": "Mouse Accel 0",
+            "QK_MOUSE_ACCELERATION_1": "Mouse Accel 1",
+            "QK_MOUSE_ACCELERATION_2": "Mouse Accel 2",
+            **{
+                f"QK_MOUSE_BUTTON_{index}": f"Mouse {index}"
+                for index in range(1, 9)
+            },
+        }
+        for keycode, label in expected.items():
+            with self.subTest(keycode=keycode):
+                self.assertEqual(_key_spec(keycode, vil), label)
+
+    def test_keyball_labels_have_an_authoritative_boundary(self) -> None:
+        vil = fixture_vil({0: ["KC_A"]})
+        expected = (
+            "Config Reset", "Config Save", "CPI +100", "CPI -100",
+            "CPI +1000", "CPI -1000", "Scroll Toggle", "Scroll Hold",
+            "Scroll Slower", "Scroll Faster", "Auto Mouse Toggle",
+            "Auto Mouse +50ms", "Auto Mouse -50ms", "Snap Vertical",
+            "Snap Horizontal", "Snap Free",
+        )
+        for index, label in enumerate(expected):
+            with self.subTest(index=index):
+                self.assertEqual(_key_spec(f"QK_KB_{index}", vil), label)
+        self.assertEqual(_key_spec("QK_KB_16", vil), "QK_KB_16")
+        self.assertEqual(_key_spec("QK_USER_0", vil), "QK_USER_0")
+
+    def test_modifier_labels_preserve_side_and_combinations(self) -> None:
+        self.assertEqual(_friendly_modifiers("MOD_LGUI"), "LGui")
+        self.assertEqual(
+            _friendly_modifiers("MOD_RCTL|MOD_RSFT|MOD_RALT"),
+            "RCtrl+RShift+RAlt",
+        )
+        self.assertEqual(_friendly_modifiers("KC_NO"), "")
+        self.assertIsNone(_friendly_modifiers("MOD_LGUI|MOD_RALT"))
+
+    def test_modifier_labels_require_canonical_vial_spelling(self) -> None:
+        vil = fixture_vil({0: ["KC_A"]})
+        for modifiers in ("MOD_LGUI|MOD_LGUI", "MOD_LSFT|MOD_LCTL"):
+            with self.subTest(modifiers=modifiers):
+                self.assertIsNone(_friendly_modifiers(modifiers))
+                self.assertEqual(
+                    _key_spec(f"MT({modifiers},KC_A)", vil),
+                    f"MT({modifiers},KC_A)",
+                )
+
+    def test_composite_keycodes_use_native_fields(self) -> None:
+        vil = fixture_vil({0: ["KC_A"]})
+        expected = {
+            "MT(MOD_LGUI,KC_A)": {"t": "A", "h": "LGui"},
+            "MT(MOD_RGUI,KC_SEMICOLON)": {"t": ";", "h": "RGui"},
+            "MT(MOD_RALT|MOD_RGUI,KC_ENTER)": {
+                "t": "Enter",
+                "h": "RAlt+RGui",
+            },
+            "MT(KC_NO,KC_A)": "A",
+            "LT(2,KC_BACKSPACE)": {"t": "Bksp", "h": "L2"},
+            "OSM(MOD_LSFT)": {"t": "LShift", "h": "one-shot"},
+            "MO(1)": {"t": "L1", "h": "hold"},
+            "TG(2)": {"t": "L2", "h": "toggle"},
+            "TO(3)": {"t": "L3", "h": "switch"},
+            "DF(4)": {"t": "L4", "h": "default"},
+            "PDF(5)": {"t": "L5", "h": "default"},
+            "OSL(6)": {"t": "L6", "h": "one-shot"},
+            "TT(7)": {"t": "L7", "h": "tap-toggle"},
+            "LM(8,MOD_LCTL|MOD_LSFT)": {"t": "L8", "h": "LCtrl+LShift"},
+            "LSFT(KC_1)": "!",
+            "LCTL(KC_C)": "LCtrl+C",
+        }
+        for keycode, spec in expected.items():
+            with self.subTest(keycode=keycode):
+                self.assertEqual(_key_spec(keycode, vil), spec)
+
+    def test_tap_dance_uses_generic_corner_annotations(self) -> None:
+        vil = fixture_vil({0: ["TD(0)"]})
+        vil["macro"] = [[["text", "=>"]]]
+        vil["tap_dance"] = [["LSFT(KC_DOT)", "KC_NO", "QK_MACRO_0", "KC_NO", 200]]
+        self.assertEqual(_key_spec("TD(0)", vil), {"t": ">", "tr": "2× =>"})
+
+    def test_tap_dance_preserves_all_four_actions_without_overloading_shifted(
+        self,
+    ) -> None:
+        vil = fixture_vil({0: ["TD(0)"]})
+        vil["tap_dance"] = [["KC_A", "KC_LEFT_SHIFT", "KC_B", "KC_C", 200]]
+        self.assertEqual(
+            _key_spec("TD(0)", vil),
+            {"t": "A", "h": "LShift", "tr": "2× B", "br": "T+H C"},
+        )
+
+    def test_tap_dance_cycles_fail_closed_to_the_original_keycode(self) -> None:
+        direct = fixture_vil({0: ["TD(0)"]})
+        direct["tap_dance"] = [["TD(0)", "KC_NO", "KC_NO", "KC_NO", 200]]
+        self.assertEqual(_key_spec("TD(0)", direct), "TD(0)")
+
+        mutual = fixture_vil({0: ["TD(0)", "TD(1)"]})
+        mutual["tap_dance"] = [
+            ["TD(1)", "KC_NO", "KC_NO", "KC_NO", 200],
+            ["TD(0)", "KC_NO", "KC_NO", "KC_NO", 200],
+        ]
+        self.assertEqual(_key_spec("TD(0)", mutual), "TD(0)")
+        self.assertEqual(_key_spec("TD(1)", mutual), "TD(1)")
+
+    def test_shared_tap_dance_dag_expands_each_node_once(self) -> None:
+        class CountingDances(list):
+            def __init__(self, entries: list[list[object]], budget: int) -> None:
+                super().__init__(entries)
+                self.budget = budget
+                self.lookups: list[int] = []
+
+            def __getitem__(self, index: int):
+                self.lookups.append(index)
+                if len(self.lookups) > self.budget:
+                    raise AssertionError("tap-dance expansion exceeded work budget")
+                return super().__getitem__(index)
+
+        depth = 12
+        entries: list[list[object]] = [
+            [f"TD({index + 1})"] * 4 + [200] for index in range(depth - 1)
+        ]
+        entries.append(["KC_A", "KC_B", "KC_C", "KC_D", 200])
+        dances = CountingDances(entries, budget=depth * 2)
+        vil = fixture_vil({0: ["TD(0)"]})
+        vil["tap_dance"] = dances
+
+        self.assertEqual(
+            _key_spec("TD(0)", vil),
+            {"t": "A", "h": "A", "tr": "2× A", "br": "T+H A"},
+        )
+        self.assertEqual(dances.lookups, list(range(depth)))
+
+    def test_numeric_aliases_require_canonical_pinned_indices(self) -> None:
+        vil = fixture_vil({0: ["KC_A"]})
+        vil["macro"] = [[["text", "M"]] for _ in range(100)]
+        self.assertEqual(_key_spec("QK_KB_00", vil), "QK_KB_00")
+        self.assertEqual(_key_spec("QK_MACRO_0", vil), "M")
+        self.assertEqual(_key_spec("QK_MACRO_31", vil), "M")
+        for keycode in ("QK_MACRO_00", "QK_MACRO_32", "QK_MACRO_99"):
+            with self.subTest(keycode=keycode):
+                self.assertEqual(_key_spec(keycode, vil), keycode)
+
+    def test_composites_preserve_empty_keycode_labels(self) -> None:
+        vil = fixture_vil({0: ["KC_A"]})
+        self.assertEqual(
+            _key_spec("MT(MOD_LGUI,KC_NO)", vil),
+            {"t": "", "h": "LGui"},
+        )
+        self.assertEqual(
+            _key_spec("LT(2,KC_TRANSPARENT)", vil),
+            {"t": "", "h": "L2"},
+        )
+        vil["tap_dance"] = [["KC_TRANSPARENT", "KC_NO", "KC_NO", "KC_NO", 200]]
+        self.assertEqual(_key_spec("TD(0)", vil), {"t": ""})
+        self.assertEqual(_key_spec("LCTL(KC_NO)", vil), "LCtrl")
+        self.assertEqual(_key_spec("LSFT(KC_TRANSPARENT)", vil), "LShift")
+
+    def test_unknown_and_malformed_values_are_not_repaired(self) -> None:
+        vil = fixture_vil({0: ["KC_A"]})
+        for keycode in ("QK_KB_16", "MY_CUSTOM", "MT(MOD_LGUI)", "TD(99)"):
+            with self.subTest(keycode=keycode):
+                self.assertEqual(_key_spec(keycode, vil), keycode)
 
 
 class ReachabilityTests(unittest.TestCase):
@@ -562,6 +767,261 @@ class ValidationTests(unittest.TestCase):
 
 
 class NormalizationTests(unittest.TestCase):
+    def test_converter_legends_are_replaced_by_canonical_vial_semantics(self) -> None:
+        vil = fixture_vil({0: ["MT(MOD_LGUI,KC_A)", "KC_PAGE_DOWN"]})
+        converted = (
+            'layout: {"qmk_info_json":"unused"}\n'
+            "layers:\n  L0:\n"
+            '    - {"s":"MT+","t":"MOD_LGUI,KC_A"}\n'
+            "    - PAGE_DOWN\n"
+        )
+        normalized = _normalize_converter_yaml(
+            converted, vil, (0,), (("L00", 0), ("L01", 1)), 2
+        ).decode()
+        self.assertIn('{"h":"LGui","t":"A"}', normalized)
+        self.assertIn('    - "PgDn"', normalized)
+        self.assertNotIn("MT+", normalized)
+        self.assertNotIn("MOD_LGUI", normalized)
+
+    def test_combo_outputs_are_correlated_and_translated(self) -> None:
+        vil = fixture_vil({0: ["KC_A", "KC_B"]})
+        vil["combo"] = [["KC_A", "KC_B", "KC_NO", "KC_NO", "QK_MOUSE_BUTTON_1"]]
+        converted = (
+            'layout: {"qmk_info_json":"unused"}\n'
+            'layers:\n  L0:\n    - "A"\n    - "B"\n'
+            'combos:\n  - {"k":"wrong","l":["L0"],"p":[0,1]}\n'
+        )
+        normalized = _normalize_converter_yaml(
+            converted, vil, (0,), (("L00", 0), ("L01", 1)), 2
+        ).decode()
+        self.assertIn('"k":"Mouse 1"', normalized)
+
+    def test_combo_triggers_must_match_the_declared_layer(self) -> None:
+        vil = fixture_vil(
+            {0: ["KC_A", "KC_B"], 1: ["KC_C", "KC_D"]}
+        )
+        vil["combo"] = [["KC_A", "KC_B", "KC_NO", "KC_NO", "KC_ESCAPE"]]
+        converted = (
+            "layout: {}\nlayers:\n"
+            "  L0:\n    - A\n    - B\n"
+            "  L1:\n    - C\n    - D\n"
+            'combos:\n  - {"k":"Esc","l":["L1"],"p":[0,1]}\n'
+        )
+
+        with self.assertRaisesRegex(RenderError, "combo.*trigger"):
+            _normalize_converter_yaml(
+                converted, vil, (0, 1), (("L00", 0), ("L01", 1)), 2
+            )
+
+    def test_combo_triggers_can_match_a_nonzero_declared_layer(self) -> None:
+        vil = fixture_vil(
+            {0: ["KC_A", "KC_B"], 1: ["KC_C", "KC_D"]}
+        )
+        vil["combo"] = [
+            ["KC_C", "KC_D", "KC_NO", "KC_NO", "QK_MOUSE_BUTTON_1"]
+        ]
+        converted = (
+            "layout: {}\nlayers:\n"
+            "  L0:\n    - A\n    - B\n"
+            "  L1:\n    - C\n    - D\n"
+            'combos:\n  - {"k":"wrong","l":["L1"],"p":[0,1]}\n'
+        )
+
+        normalized = _normalize_converter_yaml(
+            converted, vil, (0, 1), (("L00", 0), ("L01", 1)), 2
+        ).decode()
+
+        self.assertIn('"k":"Mouse 1"', normalized)
+        self.assertIn('"l":["L1"]', normalized)
+
+    def test_inconsistent_multi_layer_combo_record_fails_closed(self) -> None:
+        vil = fixture_vil(
+            {0: ["KC_A", "KC_B"], 1: ["KC_A", "KC_C"]}
+        )
+        vil["combo"] = [["KC_A", "KC_B", "KC_NO", "KC_NO", "KC_ESCAPE"]]
+        converted = (
+            "layout: {}\nlayers:\n"
+            "  L0:\n    - A\n    - B\n"
+            "  L1:\n    - A\n    - C\n"
+            'combos:\n  - {"k":"Esc","l":["L0","L1"],"p":[0,1]}\n'
+        )
+
+        with self.assertRaisesRegex(RenderError, "combo.*trigger"):
+            _normalize_converter_yaml(
+                converted, vil, (0, 1), (("L00", 0), ("L01", 1)), 2
+            )
+
+    def test_converter_can_repeat_one_canonical_combo_on_distinct_layers(self) -> None:
+        vil = fixture_vil(
+            {
+                0: ["KC_A", "KC_B", "KC_C", "KC_D"],
+                1: ["KC_C", "KC_D", "KC_A", "KC_B"],
+            }
+        )
+        vil["combo"] = [["KC_A", "KC_B", "KC_NO", "KC_NO", "KC_ESCAPE"]]
+        converted = (
+            "layout: {}\nlayers:\n"
+            "  L0:\n    - A\n    - B\n    - C\n    - D\n"
+            "  L1:\n    - C\n    - D\n    - A\n    - B\n"
+            'combos:\n  - {"k":"wrong","l":["L0"],"p":[0,1]}\n'
+            '  - {"k":"wrong","l":["L1"],"p":[2,3]}\n'
+        )
+
+        normalized = _normalize_converter_yaml(
+            converted,
+            vil,
+            (0, 1),
+            (("L00", 0), ("L01", 1), ("L02", 2), ("L03", 3)),
+            4,
+        ).decode()
+
+        self.assertEqual(normalized.count('"k":"Esc"'), 2)
+        self.assertIn('"l":["L0"]', normalized)
+        self.assertIn('"l":["L1"]', normalized)
+
+    def test_count_equivalent_records_cannot_hide_a_missing_canonical_combo(
+        self,
+    ) -> None:
+        vil = fixture_vil(
+            {
+                0: ["KC_A", "KC_B", "KC_C", "KC_D"],
+                1: ["KC_A", "KC_B", "KC_C", "KC_D"],
+            }
+        )
+        vil["combo"] = [
+            ["KC_A", "KC_B", "KC_NO", "KC_NO", "KC_ESCAPE"],
+            ["KC_C", "KC_D", "KC_NO", "KC_NO", "QK_MOUSE_BUTTON_1"],
+        ]
+        converted = (
+            "layout: {}\nlayers:\n"
+            "  L0:\n    - A\n    - B\n    - C\n    - D\n"
+            "  L1:\n    - A\n    - B\n    - C\n    - D\n"
+            'combos:\n  - {"k":"wrong","l":["L0"],"p":[0,1]}\n'
+            '  - {"k":"wrong","l":["L1"],"p":[0,1]}\n'
+        )
+
+        with self.assertRaisesRegex(RenderError, "every validated Vial combo"):
+            _normalize_converter_yaml(
+                converted,
+                vil,
+                (0, 1),
+                (("L00", 0), ("L01", 1), ("L02", 2), ("L03", 3)),
+                4,
+            )
+
+    def test_duplicate_canonical_combo_layer_record_fails_closed(self) -> None:
+        vil = fixture_vil({0: ["KC_A", "KC_B"]})
+        vil["combo"] = [["KC_A", "KC_B", "KC_NO", "KC_NO", "KC_ESCAPE"]]
+        converted = (
+            "layout: {}\nlayers:\n  L0:\n    - A\n    - B\n"
+            'combos:\n  - {"k":"wrong","l":["L0"],"p":[0,1]}\n'
+            '  - {"k":"wrong","l":["L0"],"p":[0,1]}\n'
+        )
+
+        with self.assertRaisesRegex(RenderError, "duplicate.*layer"):
+            _normalize_converter_yaml(
+                converted, vil, (0,), (("L00", 0), ("L01", 1)), 2
+            )
+
+    def test_noncanonical_layer_name_cannot_bypass_duplicate_detection(self) -> None:
+        vil = fixture_vil({0: ["KC_A", "KC_B"]})
+        vil["combo"] = [["KC_A", "KC_B", "KC_NO", "KC_NO", "KC_ESCAPE"]]
+        converted = (
+            "layout: {}\nlayers:\n"
+            "  L0:\n    - A\n    - B\n"
+            "  L00:\n    - A\n    - B\n"
+            'combos:\n  - {"k":"wrong","l":["L0"],"p":[0,1]}\n'
+            '  - {"k":"wrong","l":["L00"],"p":[0,1]}\n'
+        )
+
+        with self.assertRaisesRegex(RenderError, "combo.*layer"):
+            _normalize_converter_yaml(
+                converted, vil, (0,), (("L00", 0), ("L01", 1)), 2
+            )
+
+    def test_unicode_digit_layer_name_cannot_bypass_selected_layer_filter(self) -> None:
+        vil = fixture_vil({0: ["KC_NO", "KC_NO"], 11: ["KC_A", "KC_B"]})
+        vil["combo"] = [["KC_A", "KC_B", "KC_NO", "KC_NO", "KC_ESCAPE"]]
+        converted = (
+            "layout: {}\nlayers:\n"
+            "  L11:\n    - A\n    - B\n"
+            "  L1١:\n    - A\n    - B\n"
+            'combos:\n  - {"k":"wrong","l":["L1١"],"p":[0,1]}\n'
+        )
+
+        with self.assertRaises(RenderError):
+            _normalize_converter_yaml(
+                converted, vil, (11,), (("L00", 0), ("L01", 1)), 2
+            )
+
+    def test_ascii_multi_digit_combo_layer_is_canonical(self) -> None:
+        vil = fixture_vil({0: ["KC_NO", "KC_NO"], 11: ["KC_A", "KC_B"]})
+        vil["combo"] = [["KC_A", "KC_B", "KC_NO", "KC_NO", "KC_ESCAPE"]]
+        converted = (
+            "layout: {}\nlayers:\n  L11:\n    - A\n    - B\n"
+            'combos:\n  - {"k":"wrong","l":["L11"],"p":[0,1]}\n'
+        )
+
+        normalized = _normalize_converter_yaml(
+            converted, vil, (11,), (("L00", 0), ("L01", 1)), 2
+        ).decode()
+
+        self.assertIn('"k":"Esc"', normalized)
+        self.assertIn('"l":["L11"]', normalized)
+
+    def test_ambiguous_canonical_combo_triggers_fail_closed(self) -> None:
+        vil = fixture_vil({0: ["KC_A", "KC_B"]})
+        vil["combo"] = [
+            ["KC_A", "KC_B", "KC_NO", "KC_NO", "KC_ESCAPE"],
+            ["KC_A", "KC_B", "KC_NO", "KC_NO", "QK_MOUSE_BUTTON_1"],
+        ]
+        converted = (
+            "layout: {}\nlayers:\n  L0:\n    - A\n    - B\n"
+            'combos:\n  - {"k":"wrong","l":["L0"],"p":[0,1]}\n'
+        )
+
+        with self.assertRaisesRegex(RenderError, "ambiguous duplicate triggers"):
+            _normalize_converter_yaml(
+                converted, vil, (0,), (("L00", 0), ("L01", 1)), 2
+            )
+
+    def test_combo_count_mismatch_fails_closed(self) -> None:
+        vil = fixture_vil({0: ["KC_A", "KC_B"]})
+        vil["combo"] = [["KC_A", "KC_B", "KC_NO", "KC_NO", "KC_ESCAPE"]]
+        converted = "layout: {}\nlayers:\n  L0:\n    - A\n    - B\n"
+        with self.assertRaisesRegex(RenderError, "combo.*does not match"):
+            _normalize_converter_yaml(
+                converted, vil, (0,), (("L00", 0), ("L01", 1)), 2
+            )
+
+    def test_combo_trigger_mismatch_fails_closed(self) -> None:
+        vil = fixture_vil({0: ["KC_A", "KC_B", "KC_C"]})
+        vil["combo"] = [["KC_A", "KC_B", "KC_NO", "KC_NO", "KC_ESCAPE"]]
+        converted = (
+            "layout: {}\nlayers:\n  L0:\n    - A\n    - B\n    - C\n"
+            'combos:\n  - {"k":"Esc","l":["L0"],"p":[1,2]}\n'
+        )
+        with self.assertRaisesRegex(RenderError, "combo.*trigger"):
+            _normalize_converter_yaml(
+                converted,
+                vil,
+                (0,),
+                (("L00", 0), ("L01", 1), ("L02", 2)),
+                3,
+            )
+
+    def test_combo_trigger_order_mismatch_fails_closed(self) -> None:
+        vil = fixture_vil({0: ["KC_A", "KC_B"]})
+        vil["combo"] = [["KC_A", "KC_B", "KC_NO", "KC_NO", "KC_ESCAPE"]]
+        converted = (
+            "layout: {}\nlayers:\n  L0:\n    - A\n    - B\n"
+            'combos:\n  - {"k":"Esc","l":["L0"],"p":[1,0]}\n'
+        )
+        with self.assertRaisesRegex(RenderError, "combo.*trigger"):
+            _normalize_converter_yaml(
+                converted, vil, (0,), (("L00", 0), ("L01", 1)), 2
+            )
+
     def test_normalized_vil_is_stable_and_preserves_layer_indices(self) -> None:
         vil = fixture_vil({0: ["MO(2)"], 1: ["KC_B"], 2: ["KC_C"]})
 
@@ -782,6 +1242,9 @@ class RenderingTests(unittest.TestCase):
         keys = "\n".join('    - "KC_A"' for _ in range(48))
         malformed = (
             {"k": "Escape", "l": "L0", "p": [0, 1]},
+            {"k": "Escape", "l": [], "p": [0, 1]},
+            {"k": "Escape", "l": ["base"], "p": [0, 1]},
+            {"k": "Escape", "l": [1], "p": [0, 1]},
             {"k": "Escape", "l": ["L0"], "p": "0,1"},
             {"k": "Escape", "l": ["L0"], "p": [True, 1]},
             {"k": "Escape", "l": ["L0"], "p": [0, -1]},
@@ -819,30 +1282,51 @@ class RenderingTests(unittest.TestCase):
                         runner,
                     )
 
-    def test_real_composite_converter_combo_key_is_accepted(self) -> None:
-        keys = "\n".join('    - "KC_A"' for _ in range(48))
+    def test_converter_combo_key_is_replaced_by_canonical_semantics(self) -> None:
+        keys = "\n".join('    - "KC_A"' for _ in range(56))
         combo = {
             "k": {"t": "Escape", "h": "", "s": "Shift", "type": "held"},
             "l": ["L0"],
-            "p": [0, 1],
+            "p": [46, 45],
         }
         runner = FakeRenderRunner(
             converter_yaml=(
                 'layout: {"qmk_info_json":"unused"}\n'
-                f"layers:\n  L0:\n{keys}\ncombos:\n"
+                f"layers:\n  L0:\n{keys}\n  L3:\n{keys}\ncombos:\n"
                 f"  - {json.dumps(combo)}\n"
             )
         )
         with tempfile.TemporaryDirectory() as directory:
             render_backup(
-                CONVERTER_FIXTURES / "keyball39.vil",
-                Path(directory) / "keyball39.svg",
-                self.models["keyball39"],
+                CONVERTER_FIXTURES / "keyball44.vil",
+                Path(directory) / "keyball44.svg",
+                self.models["keyball44"],
                 self.tools,
                 runner,
             )
 
-        self.assertIn(b'"h":""', runner.keymap_inputs[0])
+        self.assertIn(b'"k":"Mouse 1"', runner.keymap_inputs[0])
+
+    def test_combo_count_mismatch_is_rejected_before_drawing(self) -> None:
+        keys = "\n".join('    - "KC_A"' for _ in range(48))
+        runner = FakeRenderRunner(
+            converter_yaml=(
+                'layout: {"qmk_info_json":"unused"}\n'
+                f"layers:\n  L0:\n{keys}\ncombos:\n"
+                '  - {"k":"Escape","l":["L0"],"p":[0,1]}\n'
+            )
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(RenderError, "combo.*does not match"):
+                render_backup(
+                    CONVERTER_FIXTURES / "keyball39.vil",
+                    Path(directory) / "keyball39.svg",
+                    self.models["keyball39"],
+                    self.tools,
+                    runner,
+                )
+
+        self.assertEqual(len(runner.calls), 1)
 
     def test_converter_layer_requires_exact_electrical_matrix_size(self) -> None:
         keys = "\n".join('    - "KC_A"' for _ in range(42))
@@ -980,24 +1464,114 @@ class RealRenderingIntegrationTests(unittest.TestCase):
 
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
+            keyball44_fixture = root / "keyball44.vil"
+            write_keyball44_legend_fixture(keyball44_fixture)
             for slug in ("keyball39", "keyball44"):
                 first = root / f"{slug}-first.svg"
                 second = root / f"{slug}-second.svg"
+                fixture = (
+                    keyball44_fixture
+                    if slug == "keyball44"
+                    else CONVERTER_FIXTURES / "keyball39.vil"
+                )
                 render_backup(
-                    CONVERTER_FIXTURES / f"{slug}.vil",
+                    fixture,
                     first,
                     models[slug],
                     tools,
                     run_command,
                 )
                 render_backup(
-                    CONVERTER_FIXTURES / f"{slug}.vil",
+                    fixture,
                     second,
                     models[slug],
                     tools,
                     run_command,
                 )
                 self.assertEqual(first.read_bytes(), second.read_bytes())
+                if slug == "keyball44":
+                    text = first.read_text()
+                    root = ET.parse(first).getroot()
+
+                    def local_name(element: ET.Element) -> str:
+                        return element.tag.rsplit("}", 1)[-1]
+
+                    def class_tokens(element: ET.Element) -> set[str]:
+                        return set(element.attrib.get("class", "").split())
+
+                    def label(element: ET.Element) -> str:
+                        return re.sub(r"\s+", "", "".join(element.itertext()))
+
+                    labels = {
+                        label(element)
+                        for element in root.iter()
+                        if local_name(element) == "text"
+                    }
+                    for expected in (
+                        ">", "2×=>", "LGui", "Mouse←", "PgDn",
+                        "ConfigReset", "SnapFree", "QK_KB_16",
+                    ):
+                        with self.subTest(expected=expected):
+                            self.assertIn(expected, labels)
+                    for raw in (
+                        "MT+", "MOD_LGUI", "QK_MOUSE_CURSOR_",
+                        "BACKSPACE", "PAGE_DOWN",
+                    ):
+                        with self.subTest(raw=raw):
+                            self.assertNotIn(raw, text)
+                    self.assertTrue(
+                        labels.isdisjoint(
+                            {f"QK_KB_{index}" for index in range(16)}
+                        )
+                    )
+                    classes = {
+                        element.attrib.get("class")
+                        for element in root.iter()
+                        if local_name(element) == "text"
+                    }
+                    self.assertTrue({"key tap", "key hold", "key tr"} <= classes)
+                    home_row_groups = [
+                        group
+                        for group in root.iter()
+                        if local_name(group) == "g"
+                        and "key" in class_tokens(group)
+                        and {"A", "LGui"}
+                        <= {
+                            label(element)
+                            for element in group.iter()
+                            if local_name(element) == "text"
+                        }
+                    ]
+                    self.assertEqual(len(home_row_groups), 1)
+                    home_row = home_row_groups[0]
+                    taps = [
+                        element
+                        for element in home_row.iter()
+                        if local_name(element) == "text" and label(element) == "A"
+                    ]
+                    holds = [
+                        element
+                        for element in home_row.iter()
+                        if local_name(element) == "text"
+                        and label(element) == "LGui"
+                    ]
+                    self.assertEqual(len(taps), 1)
+                    self.assertEqual(len(holds), 1)
+                    self.assertTrue({"key", "tap"} <= class_tokens(taps[0]))
+                    self.assertNotIn("hold", class_tokens(taps[0]))
+                    self.assertTrue({"key", "hold"} <= class_tokens(holds[0]))
+                    self.assertNotIn("tap", class_tokens(holds[0]))
+                    combo_mouse_nodes = [
+                        element
+                        for group in root.iter()
+                        if local_name(group) == "g"
+                        and "combo" in class_tokens(group)
+                        for element in group.iter()
+                        if local_name(element) == "text"
+                        and label(element) == "Mouse1"
+                        and {"combo", "tap"} <= class_tokens(element)
+                    ]
+                    self.assertEqual(len(combo_mouse_nodes), 1)
 
 
 if __name__ == "__main__":
