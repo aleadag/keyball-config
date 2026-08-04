@@ -10,3 +10,7 @@
 
 # Generated keymap diagrams and intermediate site files
 /build/
+
+# Python bytecode caches
+__pycache__/
+*.py[cod]
