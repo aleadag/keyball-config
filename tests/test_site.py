@@ -20,6 +20,7 @@ from keyball_config.keymap import RenderTools
 from keyball_config.site import (
     SiteCleanupWarning,
     SiteError,
+    _KEYMAP_LEGEND,
     _site_html,
     build_site,
     validate_site,
@@ -145,6 +146,24 @@ class SiteTests(unittest.TestCase):
                 self.assertIn(f'src="{slug}.svg"', html)
                 self.assertIn(f'href="{slug}.svg"', html)
             validate_site(output, ("keyball39", "keyball44"))
+
+    def test_each_model_has_one_fixed_key_legend_after_its_links(self) -> None:
+        one = _site_html((self.models["keyball44"],))
+        both = _site_html((self.models["keyball39"], self.models["keyball44"]))
+
+        self.assertEqual(one.count(_KEYMAP_LEGEND), 1)
+        self.assertEqual(both.count(_KEYMAP_LEGEND), 2)
+        self.assertLess(one.index("Download SVG"), one.index(_KEYMAP_LEGEND))
+        for text in (
+            "Center = tap",
+            "bottom = hold",
+            "2×",
+            "T+H",
+            "Mouse",
+            "raw keycode",
+        ):
+            with self.subTest(text=text):
+                self.assertIn(text, _KEYMAP_LEGEND)
 
     def test_invalid_second_profile_preserves_absent_or_exact_prior_output(self) -> None:
         for with_prior in (False, True):
@@ -426,6 +445,66 @@ class SiteValidationTests(unittest.TestCase):
             ):
                 validate_site(site, ("keyball44",))
 
+    def test_accepts_pinned_internal_layer_activator_links(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            site = self._valid_site(Path(directory))
+            (site / "keyball44.svg").write_text(
+                '<svg xmlns="http://www.w3.org/2000/svg">'
+                '<a href="#L3"><text class="key tap layer-activator" '
+                'x="0" y="0">L3</text></a>'
+                '<text id="L3" x="0" y="28">L3:</text>'
+                '<text id="L4" x="0" y="56">L4:</text>'
+                '<a href="#L4"><text class="key tap layer-activator" '
+                'x="0" y="84">L4</text></a></svg>'
+            )
+
+            validate_site(site, ("keyball44",))
+
+    def test_rejects_missing_or_duplicate_svg_anchor_targets(self) -> None:
+        documents = (
+            '<a href="#L3"><text x="0" y="0">L3</text></a>',
+            '<text id="L3" x="0" y="0">L3:</text>'
+            '<text id="L3" x="0" y="28">duplicate</text>'
+            '<a href="#L3"><text x="0" y="56">L3</text></a>',
+        )
+        for document in documents:
+            with self.subTest(document=document), tempfile.TemporaryDirectory() as directory:
+                site = self._valid_site(Path(directory))
+                (site / "keyball44.svg").write_text(
+                    '<svg xmlns="http://www.w3.org/2000/svg">'
+                    + document
+                    + "</svg>"
+                )
+
+                with self.assertRaisesRegex(SiteError, "exactly one local element"):
+                    validate_site(site, ("keyball44",))
+
+    def test_rejects_other_svg_anchor_targets_and_attributes(self) -> None:
+        anchors = (
+            '<a href="#keyball44"/>',
+            '<a href="#L"/>',
+            '<a href="#L-1"/>',
+            '<a href="#L3/other"/>',
+            '<a href="https://example.com/#L3"/>',
+            '<a href="file:///tmp/keymap.svg#L3"/>',
+            '<a href="../keymap.svg#L3"/>',
+            '<a href="keymap.svg#L3"/>',
+            '<a href="#L3" target="_blank"/>',
+            '<a xmlns:xlink="http://www.w3.org/1999/xlink" xlink:href="#L3"/>',
+            "<a/>",
+        )
+        for anchor in anchors:
+            with self.subTest(anchor=anchor), tempfile.TemporaryDirectory() as directory:
+                site = self._valid_site(Path(directory))
+                (site / "keyball44.svg").write_text(
+                    '<svg xmlns="http://www.w3.org/2000/svg">'
+                    + anchor
+                    + "</svg>"
+                )
+
+                with self.assertRaises(SiteError):
+                    validate_site(site, ("keyball44",))
+
     def test_rejects_active_content_and_external_css(self) -> None:
         attacks = (
             '<script>alert(1)</script>',
@@ -571,6 +650,13 @@ class SiteValidationTests(unittest.TestCase):
                     validate_site(site, expected)
 
         with tempfile.TemporaryDirectory() as directory:
+            site = self._valid_site(Path(directory))
+            html = (site / "index.html").read_text()
+            (site / "index.html").write_text(html.replace(_KEYMAP_LEGEND, ""))
+            with self.assertRaises(SiteError):
+                validate_site(site, ("keyball44",))
+
+        with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             site = root / "site"
             site.mkdir()
@@ -651,6 +737,10 @@ class RealSiteIntegrationTests(unittest.TestCase):
                 tuple(path.name for path in built),
                 ("index.html", "keyball39.svg", "keyball44.svg"),
             )
+            self.assertEqual(
+                (root / "site" / "index.html").read_text().count(_KEYMAP_LEGEND),
+                2,
+            )
             validate_site(root / "site", ("keyball39", "keyball44"))
             vocabulary: dict[str, set[str]] = {}
             tspan_styles: set[str] = set()
@@ -669,12 +759,13 @@ class RealSiteIntegrationTests(unittest.TestCase):
                     "svg": {"class", "height", "viewBox", "width"},
                     "style": set(),
                     "g": {"class", "transform"},
+                    "a": {"href"},
                     "rect": {"class", "height", "rx", "ry", "width", "x", "y"},
                     "text": {"class", "id", "x", "y"},
-                    "tspan": {"dy", "style", "x"},
+                    "tspan": {"dy", "x"},
                 },
             )
-            self.assertEqual(tspan_styles, {"font-size: 64%"})
+            self.assertEqual(tspan_styles, set())
 
 
 if __name__ == "__main__":

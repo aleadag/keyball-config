@@ -33,12 +33,14 @@ _ABSOLUTE_PATH = re.compile(
 _CSS_URL = re.compile(r"(?i)url\(\s*(['\"]?)(?P<target>.*?)\1\s*\)")
 _CSS_IMPORT = re.compile(r"(?i)@import\b")
 _TSPAN_STYLE = re.compile(r"font-size: (?:[1-9]|[1-9][0-9]|100)%")
+_LAYER_FRAGMENT = re.compile(r"#L[0-9]+")
 _SVG_NAMESPACE = "http://www.w3.org/2000/svg"
 _XLINK_NAMESPACE = "http://www.w3.org/1999/xlink"
 _SVG_VOCABULARY = {
     "svg": {"class", "height", "viewBox", "width"},
     "style": set(),
     "g": {"class", "transform"},
+    "a": {"href"},
     "rect": {"class", "height", "rx", "ry", "width", "x", "y"},
     "text": {"class", "id", "x", "y"},
     "tspan": {"dy", "style", "x"},
@@ -51,7 +53,15 @@ body { max-width: 96rem; margin: auto; padding: 1rem; }
 .selector { display: flex; flex-wrap: wrap; gap: 1rem; }
 section { margin-block: 2rem; }
 img { display: block; width: 100%; height: auto; }
-a { color: inherit; }"""
+a { color: inherit; }
+.legend { max-width: 60rem; }"""
+_KEYMAP_LEGEND = """<aside class="legend" aria-label="Key legend">
+<strong>Legend:</strong> Center = tap; bottom = hold; <code>2×</code> = double tap;
+<code>T+H</code> = tap-hold. <code>L</code>/<code>R</code> preserve modifier side.
+Mouse arrows show movement and Mouse numbers show buttons. Named Keyball actions
+control trackball or saved configuration behavior; a raw keycode means no
+authoritative friendly name is available.
+</aside>"""
 
 
 def build_site(
@@ -167,6 +177,8 @@ def validate_site(path: Path, expected_models: Sequence[str]) -> None:
             raise SiteError(f"invalid SVG for {slug}: {error}") from error
         if root_element.tag.rsplit("}", 1)[-1] != "svg":
             raise SiteError(f"invalid SVG for {slug}: root element is not svg")
+        id_counts: dict[str, int] = {}
+        layer_targets: list[str] = []
         for element in root_element.iter():
             local_tag = _require_svg_name(element.tag, kind="element")
             allowed_attributes = _SVG_VOCABULARY.get(local_tag)
@@ -186,12 +198,25 @@ def validate_site(path: Path, expected_models: Sequence[str]) -> None:
                 ):
                     raise SiteError("site SVG tspan style is outside the pinned vocabulary")
                 _require_safe_content(value)
+                if local_attribute == "id":
+                    id_counts[value] = id_counts.get(value, 0) + 1
+            if local_tag == "a" and (
+                set(element.attrib) != {"href"}
+                or _LAYER_FRAGMENT.fullmatch(element.attrib["href"]) is None
+            ):
+                raise SiteError("site SVG link is not a pinned layer fragment")
+            if local_tag == "a":
+                layer_targets.append(element.attrib["href"][1:])
             if local_tag == "style" and hashlib.sha256(
                 (element.text or "").encode("utf-8")
             ).hexdigest() != _SVG_STYLE_SHA256:
                 raise SiteError("site SVG style is outside the pinned vocabulary")
             _require_safe_content(element.text or "")
             _require_safe_content(element.tail or "")
+        if any(id_counts.get(target, 0) != 1 for target in layer_targets):
+            raise SiteError(
+                "site SVG link target must identify exactly one local element"
+            )
 
     try:
         html = (path / "index.html").read_text(encoding="utf-8")
@@ -221,6 +246,7 @@ def _site_html_entries(entries: Sequence[tuple[str, str]]) -> str:
 <h2>{escape(label)}</h2>
 <img src="{escape(slug)}.svg" alt="{escape(label)} keymap">
 <p><a href="{escape(slug)}.svg">Open SVG</a> · <a href="{escape(slug)}.svg" download>Download SVG</a></p>
+{_KEYMAP_LEGEND}
 </section>'''
         for slug, label in entries
     )
