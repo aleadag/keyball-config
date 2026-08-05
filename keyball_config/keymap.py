@@ -150,26 +150,27 @@ _ATOMIC_LABELS = {
     "QK_MOUSE_ACCELERATION_2": "Mouse Accel 2",
     **{f"QK_MOUSE_BUTTON_{index}": f"Mouse {index}" for index in range(1, 9)},
 }
-# Pinned Keyball lib/keyball/keyball.h defines only indices 0–15; 16 is unmapped.
+# The Vial firmware used by the canonical Keyball44 backup defines indices 0–16.
 _KEYBALL_LABELS = dict(
     enumerate(
         (
-            "Config Reset",
-            "Config Save",
-            "CPI +100",
-            "CPI -100",
-            "CPI +1000",
-            "CPI -1000",
-            "Scroll Toggle",
-            "Scroll Hold",
-            "Scroll Slower",
-            "Scroll Faster",
-            "Auto Mouse Toggle",
-            "Auto Mouse +50ms",
-            "Auto Mouse -50ms",
-            "Snap Vertical",
-            "Snap Horizontal",
-            "Snap Free",
+            "DPI+",
+            "DPI-",
+            "Snp+",
+            "Snp-",
+            "Snp",
+            "SnpT",
+            "Drg",
+            "DrgT",
+            "Drg+",
+            "Drg-",
+            "ATG",
+            "A50",
+            "A50-",
+            "A100",
+            "ATV",
+            "TInfo",
+            "T_SAVE",
         )
     )
 )
@@ -223,7 +224,7 @@ def _atomic_label(keycode: str, physical_side: str | None = None) -> str:
     if keycode in _ATOMIC_LABELS:
         return _side_aware_label(_ATOMIC_LABELS[keycode], physical_side)
     match = re.fullmatch(r"QK_KB_(\d+)", keycode)
-    if match and _canonical_number(match[1], 15):
+    if match and _canonical_number(match[1], 16):
         return _KEYBALL_LABELS[int(match[1])]
     if _known_atomic_keycode(keycode) and keycode.startswith("KC_"):
         return keycode[3:].replace("_", " ").title()
