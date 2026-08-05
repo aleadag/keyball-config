@@ -92,6 +92,17 @@ _WRAPPER_LABELS = {
     "RSA": "RShift+RAlt",
     "RCS": "RCtrl+RShift",
 }
+
+
+def _side_aware_label(label: str, physical_side: str | None) -> str:
+    if physical_side not in {"L", "R"}:
+        return label
+    return "+".join(
+        part[1:] if part.startswith(physical_side) else part
+        for part in label.split("+")
+    )
+
+
 _ATOMIC_LABELS = {
     "KC_NO": "",
     "KC_TRANSPARENT": "",
@@ -187,7 +198,9 @@ _MODEL_PROTOCOLS = {
 }
 
 
-def _friendly_modifiers(value: str) -> str | None:
+def _friendly_modifiers(
+    value: str, physical_side: str | None = None
+) -> str | None:
     if value not in _VALID_MODIFIERS:
         return None
     if value == "KC_NO":
@@ -196,12 +209,15 @@ def _friendly_modifiers(value: str) -> str | None:
     sides = {part[4] for part in parts}
     if len(sides) != 1:
         return None
-    return "+".join(_MODIFIER_LABELS[part] for part in parts)
+    return "+".join(
+        _side_aware_label(_MODIFIER_LABELS[part], physical_side)
+        for part in parts
+    )
 
 
-def _atomic_label(keycode: str) -> str:
+def _atomic_label(keycode: str, physical_side: str | None = None) -> str:
     if keycode in _ATOMIC_LABELS:
-        return _ATOMIC_LABELS[keycode]
+        return _side_aware_label(_ATOMIC_LABELS[keycode], physical_side)
     match = re.fullmatch(r"QK_KB_(\d+)", keycode)
     if match and _canonical_number(match[1], 15):
         return _KEYBALL_LABELS[int(match[1])]
@@ -241,9 +257,11 @@ class _TapDanceCycle(Exception):
     pass
 
 
-def _key_spec(keycode: str, vil: Mapping[str, object]) -> KeySpec:
+def _key_spec(
+    keycode: str, vil: Mapping[str, object], physical_side: str | None = None
+) -> KeySpec:
     try:
-        return _key_spec_nested(keycode, vil, frozenset(), {})
+        return _key_spec_nested(keycode, vil, frozenset(), {}, physical_side)
     except _TapDanceCycle:
         return keycode
 
@@ -253,6 +271,7 @@ def _key_spec_nested(
     vil: Mapping[str, object],
     active_dances: frozenset[str],
     dance_memo: dict[str, KeySpec],
+    physical_side: str | None = None,
 ) -> KeySpec:
     if keycode in active_dances:
         raise _TapDanceCycle
@@ -263,15 +282,17 @@ def _key_spec_nested(
         return macro
     call = _CALL.fullmatch(keycode)
     if call is None:
-        return _atomic_label(keycode)
+        return _atomic_label(keycode, physical_side)
     arguments = _split_arguments(call["arguments"])
     if arguments is None:
         return keycode
     name = call["name"]
     if name == "MT" and len(arguments) == 2:
-        hold = _friendly_modifiers(arguments[0])
+        hold = _friendly_modifiers(arguments[0], physical_side)
         if hold is not None and arguments[1] in BASIC_KEYCODES:
-            tap = _tap_text(_key_spec(arguments[1], vil), arguments[1])
+            tap = _tap_text(
+                _key_spec(arguments[1], vil, physical_side), arguments[1]
+            )
             return {"t": tap, "h": hold} if hold else tap
     if (
         name == "LT"
@@ -280,11 +301,13 @@ def _key_spec_nested(
         and arguments[1] in BASIC_KEYCODES
     ):
         return {
-            "t": _tap_text(_key_spec(arguments[1], vil), arguments[1]),
+            "t": _tap_text(
+                _key_spec(arguments[1], vil, physical_side), arguments[1]
+            ),
             "h": f"L{arguments[0]}",
         }
     if name == "OSM" and len(arguments) == 1:
-        modifier = _friendly_modifiers(arguments[0])
+        modifier = _friendly_modifiers(arguments[0], physical_side)
         if modifier is not None:
             return {"t": modifier, "h": "one-shot"} if modifier else ""
     layer_qualifiers = {
@@ -303,7 +326,7 @@ def _key_spec_nested(
     ):
         return {"t": f"L{arguments[0]}", "h": layer_qualifiers[name]}
     if name == "LM" and len(arguments) == 2 and _canonical_number(arguments[0], 15):
-        modifier = _friendly_modifiers(arguments[1])
+        modifier = _friendly_modifiers(arguments[1], physical_side)
         if modifier is not None:
             return {"t": f"L{arguments[0]}", "h": modifier or "hold"}
     if name == "TD" and len(arguments) == 1 and _canonical_number(arguments[0], 255):
@@ -319,7 +342,11 @@ def _key_spec_nested(
                     if action != "KC_NO":
                         result[field] = prefix + _tap_text(
                             _key_spec_nested(
-                                action, vil, next_active_dances, dance_memo
+                                action,
+                                vil,
+                                next_active_dances,
+                                dance_memo,
+                                physical_side,
                             ),
                             action,
                         )
@@ -337,8 +364,11 @@ def _key_spec_nested(
         and len(arguments) == 1
         and arguments[0] in BASIC_KEYCODES
     ):
-        inner = _tap_text(_key_spec(arguments[0], vil), arguments[0])
-        return f"{_WRAPPER_LABELS[name]}+{inner}" if inner else _WRAPPER_LABELS[name]
+        label = _side_aware_label(_WRAPPER_LABELS[name], physical_side)
+        inner = _tap_text(
+            _key_spec(arguments[0], vil, physical_side), arguments[0]
+        )
+        return f"{label}+{inner}" if inner else label
     return keycode
 
 
@@ -607,10 +637,13 @@ def _normalize_converter_yaml(
         assert isinstance(source_layer, list)
         source_keycodes = [keycode for row in source_layer for keycode in row]
         lines.append(f"  {name}:")
-        lines.extend(
-            f"    - {_serialize_key_spec(_key_spec(source_keycodes[index], vil))}"
-            for index in selected_indices
-        )
+        for label, index in positions:
+            lines.append(
+                "    - "
+                + _serialize_key_spec(
+                    _key_spec(source_keycodes[index], vil, label[:1])
+                )
+            )
 
     combo_definitions = _active_combo_definitions(vil)
     represented_definitions: set[int] = set()
