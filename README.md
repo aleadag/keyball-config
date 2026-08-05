@@ -6,6 +6,9 @@ This repository keeps canonical Vial settings for supported Keyball keyboards
 and renders their keymaps as a static site. The current registry supports
 Keyball39 and Keyball44 on `x86_64-linux`.
 
+Some of the keymap settings were informed by [Thoughts on Customising a Split
+Keyboard Layout](https://thrly.com/blog/thoughts-on-customising-a-split-keyboard-layout/).
+
 The root `keyball39.vil` and `keyball44.vil` files are the canonical backups.
 Rendered SVG, converter YAML, and HTML are generated artifacts; they belong in
 `build/` or a Nix result and must not be committed.
