@@ -1,0 +1,47 @@
+--- a/src/commands/save.rs
++++ b/src/commands/save.rs
+@@ -12,6 +12,7 @@
+     device: &DeviceInfo,
+     meta_file: &Option<String>,
+     file: &String,
++    definition_file: &Option<String>,
+ ) -> Result<()> {
+     let device_path = device.path();
+     let dev = api.open_path(device_path)?;
+@@ -171,6 +172,14 @@
+             .insert("macro".to_string(), Value::Array([].to_vec()));
+     }
+ 
++    if let Some(definition_file) = definition_file {
++        if capabilities.vial_version == 0 {
++            return Err(anyhow!("definition export requires Vial protocol"));
++        }
++        let definition = serde_json::to_string_pretty(&meta)? + "\n";
++        fs::write(definition_file, definition)?;
++    }
++
+     if !qmk_settings.is_empty() {
+         result
+             .as_object_mut()
+--- a/src/main.rs
++++ b/src/main.rs
+@@ -223,6 +223,10 @@
+     /// path to layout file
+     #[argh(option, short = 'f')]
+     file: String,
++
++    /// path to save the raw Vial definition
++    #[argh(option, short = 'd')]
++    definition: Option<String>,
+ }
+ 
+ #[derive(FromArgs, PartialEq, Debug)]
+@@ -345,7 +349,7 @@
+                             commands::load_run(&api, device, &ops.meta, &ops.file, ops.preview)
+                         }
+                         CommandEnum::Save(ops) => {
+-                            commands::save_run(&api, device, &ops.meta, &ops.file)
++                            commands::save_run(&api, device, &ops.meta, &ops.file, &ops.definition)
+                         }
+                         CommandEnum::Rgb(ops) => commands::rgb_run(&api, device, ops),
+                         CommandEnum::Layout(ops) => {

@@ -17,6 +17,8 @@ rustPlatform.buildRustPackage rec {
     hash = "sha256-u1OmH2AeskcjNB1ac6iSBaA0Xyea+tB8f5F/LCzafj4=";
   };
 
+  patches = [ ./vitaly-save-definition.patch ];
+
   cargoHash = "sha256-HBJFOi3KrjIepGaPwtv/39sQotvQPae9y2rdPJ/uQ8k=";
 
   nativeBuildInputs = [ pkg-config ];

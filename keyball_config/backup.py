@@ -18,7 +18,10 @@ from keyball_config.devices import (
     parse_devices,
     select_device,
 )
-from keyball_config.keymap import load_and_validate_vil
+from keyball_config.keymap import (
+    load_and_validate_vial_definition,
+    load_and_validate_vil,
+)
 
 
 @dataclass(frozen=True)
@@ -85,13 +88,22 @@ def backup(repo: Path, registry_path: Path, runner: Runner) -> Path:
         raise BackupError(str(error)) from error
 
     filename = _canonical_target_name(model)
+    definition_filename = f"{model.slug}.vial.json"
     target = repo / filename
-    initial = _snapshot_target(target)
-    _inspect_git_target(repo, filename, initial.exists, runner)
-    if _snapshot_target(target) != initial:
-        raise BackupError(f"target {filename} changed during initial safety inspection")
+    definition_target = repo / definition_filename
+    targets = (
+        (filename, target),
+        (definition_filename, definition_target),
+    )
+    initial = tuple((name, path, _snapshot_target(path)) for name, path in targets)
+    for name, _, snapshot in initial:
+        _inspect_git_target(repo, name, snapshot.exists, runner)
+        if _snapshot_target(repo / name) != snapshot:
+            raise BackupError(
+                f"target {name} changed during initial safety inspection"
+            )
 
-    private_dir, temporary = _fresh_private_output(target)
+    private_dir, temporary, definition_temporary = _fresh_private_output(target)
     primary_failure: BaseException | None = None
     try:
         save_args = (
@@ -101,6 +113,8 @@ def backup(repo: Path, registry_path: Path, runner: Runner) -> Path:
             "save",
             "-f",
             str(temporary),
+            "-d",
+            str(definition_temporary),
         )
         try:
             save_result = runner(save_args, repo)
@@ -109,20 +123,44 @@ def backup(repo: Path, registry_path: Path, runner: Runner) -> Path:
         _validate_save_result(save_result, temporary, device)
 
         export_fd = _open_export(temporary)
+        definition_fd: int | None = None
         try:
+            definition_fd = _open_export(definition_temporary)
             try:
-                load_and_validate_vil(Path(f"/proc/self/fd/{export_fd}"), model)
+                vil = load_and_validate_vil(Path(f"/proc/self/fd/{export_fd}"), model)
+                matrix = vil["layout"][0]
+                assert isinstance(matrix, list)
+                matrix_shape = (len(matrix), len(matrix[0]))
+                load_and_validate_vial_definition(
+                    Path(f"/proc/self/fd/{definition_fd}"),
+                    model,
+                    matrix_shape,
+                )
                 os.fsync(export_fd)
+                os.fsync(definition_fd)
             except (OSError, ValueError) as error:
-                raise BackupError(f"invalid Vitaly export: {error}") from error
-            _inspect_git_target(repo, filename, initial.exists, runner)
-            if _snapshot_target(target) != initial:
-                raise BackupError(f"target {filename} changed while backup was running")
+                raise BackupError(f"invalid Vitaly export pair: {error}") from error
+            for name, _, snapshot in initial:
+                _inspect_git_target(repo, name, snapshot.exists, runner)
+                if _snapshot_target(repo / name) != snapshot:
+                    raise BackupError(
+                        f"target {name} changed while backup was running"
+                    )
 
             _require_same_export_inode(temporary, export_fd)
-            _replace_from_private_dir(repo, private_dir, temporary.name, filename)
+            _require_same_export_inode(definition_temporary, definition_fd)
+            _replace_pair_from_private_dir(
+                repo,
+                private_dir,
+                (
+                    (temporary.name, filename),
+                    (definition_temporary.name, definition_filename),
+                ),
+            )
         finally:
             os.close(export_fd)
+            if definition_fd is not None:
+                os.close(definition_fd)
         return target
     except BaseException as error:
         primary_failure = error
@@ -235,7 +273,7 @@ def _snapshot_target(target: Path) -> _TargetSnapshot:
         os.close(descriptor)
 
 
-def _fresh_private_output(target: Path) -> tuple[Path, Path]:
+def _fresh_private_output(target: Path) -> tuple[Path, Path, Path]:
     try:
         private_dir = Path(
             tempfile.mkdtemp(prefix=f".{target.name}.", dir=target.parent)
@@ -256,7 +294,8 @@ def _fresh_private_output(target: Path) -> tuple[Path, Path]:
             temporary.unlink()
         except OSError as error:
             raise BackupError(f"cannot remove export placeholder: {error}") from error
-        return private_dir, temporary
+        definition_temporary = private_dir / f"{temporary.stem}.vial.json"
+        return private_dir, temporary, definition_temporary
     except BaseException as error:
         _cleanup_private_dir(private_dir, error)
         raise
@@ -307,32 +346,67 @@ def _require_same_export_inode(path: Path, descriptor: int) -> None:
         raise BackupError("Vitaly export path changed after validation")
 
 
-def _replace_from_private_dir(
+def _replace_pair_from_private_dir(
     repo: Path,
     private_dir: Path,
-    temporary_name: str,
-    target_name: str,
+    replacements: Sequence[tuple[str, str]],
 ) -> None:
     directory_flags = os.O_RDONLY
     if hasattr(os, "O_DIRECTORY"):
         directory_flags |= os.O_DIRECTORY
+    source_dir_fd: int | None = None
+    destination_dir_fd: int | None = None
+    moved: list[tuple[str, str]] = []
+    installed: list[str] = []
     try:
         source_dir_fd = os.open(private_dir, directory_flags)
-        try:
-            destination_dir_fd = os.open(repo, directory_flags)
+        destination_dir_fd = os.open(repo, directory_flags)
+        for _, target_name in replacements:
+            backup_name = f".old-{target_name}"
             try:
                 os.replace(
-                    temporary_name,
+                    target_name,
+                    backup_name,
+                    src_dir_fd=destination_dir_fd,
+                    dst_dir_fd=source_dir_fd,
+                )
+            except FileNotFoundError:
+                continue
+            moved.append((backup_name, target_name))
+        for temporary_name, target_name in replacements:
+            os.replace(
+                temporary_name,
+                target_name,
+                src_dir_fd=source_dir_fd,
+                dst_dir_fd=destination_dir_fd,
+            )
+            installed.append(target_name)
+        for backup_name, _ in moved:
+            os.unlink(backup_name, dir_fd=source_dir_fd)
+    except OSError as error:
+        try:
+            for target_name in reversed(installed):
+                try:
+                    os.unlink(target_name, dir_fd=destination_dir_fd)
+                except FileNotFoundError:
+                    pass
+            for backup_name, target_name in reversed(moved):
+                os.replace(
+                    backup_name,
                     target_name,
                     src_dir_fd=source_dir_fd,
                     dst_dir_fd=destination_dir_fd,
                 )
-            finally:
-                os.close(destination_dir_fd)
-        finally:
+        except OSError as rollback_error:
+            error.add_note(f"failed to roll back backup pair: {rollback_error}")
+        raise BackupError(
+            f"cannot atomically replace backup pair: {error}"
+        ) from error
+    finally:
+        if destination_dir_fd is not None:
+            os.close(destination_dir_fd)
+        if source_dir_fd is not None:
             os.close(source_dir_fd)
-    except OSError as error:
-        raise BackupError(f"cannot atomically replace {target_name}: {error}") from error
 
 
 def _validate_save_result(

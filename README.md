@@ -9,9 +9,11 @@ Keyball39 and Keyball44 on `x86_64-linux`.
 Some of the keymap settings were informed by [Thoughts on Customising a Split
 Keyboard Layout](https://thrly.com/blog/thoughts-on-customising-a-split-keyboard-layout/).
 
-The root `keyball39.vil` and `keyball44.vil` files are the canonical backups.
-Rendered SVG, converter YAML, and HTML are generated artifacts; they belong in
-`build/` or a Nix result and must not be committed.
+The root `keyball39.vil` and `keyball44.vil` files are the canonical keymap
+backups. Each can have a matching `<slug>.vial.json` companion containing the
+live Vial layout definition used to draw the keyboard geometry. Rendered SVG,
+converter YAML, and HTML are generated artifacts; they belong in `build/` or a
+Nix result and must not be committed.
 
 ## Quick start
 
@@ -39,7 +41,7 @@ vitaly devices
 Then make sure the existing canonical backup is clean before exporting:
 
 ```bash
-git status --short -- keyball39.vil keyball44.vil
+git status --short -- 'keyball*.vil' 'keyball*.vial.json'
 nix run .#backup
 ```
 
@@ -50,13 +52,14 @@ multiple records or a colliding Vitaly selector ID. An existing target must be
 tracked and unchanged. Vitaly's status, diagnostics, output freshness, JSON,
 and model-specific Vial data must all pass validation before an atomic
 replacement occurs. There is no force option. A failure before replacement
-preserves the previous backup, and replacement itself is atomic.
+preserves the previous backup pair, and the pair is published with rollback if
+either replacement fails.
 
-Review and stage only the file printed by the backup command, for example:
+Review and stage the two files for the detected model, for example:
 
 ```bash
-git diff -- keyball44.vil
-git add keyball44.vil
+git diff -- keyball44.vil keyball44.vial.json
+git add keyball44.vil keyball44.vial.json
 ```
 
 The command does not commit or push. It also never changes the other model's
@@ -80,7 +83,10 @@ nix run .#render -- --output build --model keyball44
 ```
 
 The diagrams include layers reachable from layer 0 plus any reviewed additive
-`include_layers` entries in `config/models.json`.
+`include_layers` entries in `config/models.json`. When the matching
+`.vial.json` companion exists, its live Vial KLE geometry—including rotations
+and the active layout option—is used; older `.vil`-only backups use the pinned
+fallback geometry.
 
 ## Build and inspect the site
 
