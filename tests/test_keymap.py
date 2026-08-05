@@ -349,6 +349,18 @@ class KeyLegendTests(unittest.TestCase):
             with self.subTest(keycode=keycode):
                 self.assertEqual(_key_spec(keycode, vil), keycode)
 
+    def test_multi_command_macros_use_their_short_text_label(self) -> None:
+        vil = fixture_vil({0: ["KC_A"]})
+        vil["macro"] = [[["tap", "KC_ENTER"], ["text", "accept"]]]
+
+        self.assertEqual(_key_spec("QK_MACRO_0", vil), "accept")
+
+    def test_macros_without_text_keep_the_generic_label(self) -> None:
+        vil = fixture_vil({0: ["KC_A"]})
+        vil["macro"] = [[["tap", "KC_ENTER"], ["delay", 100]]]
+
+        self.assertEqual(_key_spec("QK_MACRO_0", vil), "Macro 0")
+
     def test_composites_preserve_empty_keycode_labels(self) -> None:
         vil = fixture_vil({0: ["KC_A"]})
         self.assertEqual(

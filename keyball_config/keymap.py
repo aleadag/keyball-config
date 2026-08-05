@@ -246,15 +246,17 @@ def _macro_label(keycode: str, vil: Mapping[str, object]) -> str | None:
     if not isinstance(macros, list) or index >= len(macros):
         return f"Macro {index}"
     macro = macros[index]
-    if (
-        isinstance(macro, list)
-        and len(macro) == 1
-        and macro[0][0] == "text"
-        and isinstance(macro[0][1], str)
-        and 0 < len(macro[0][1]) <= 8
-        and all(character.isprintable() for character in macro[0][1])
-    ):
-        return macro[0][1]
+    if isinstance(macro, list):
+        for command in macro:
+            if (
+                isinstance(command, list)
+                and len(command) == 2
+                and command[0] == "text"
+                and isinstance(command[1], str)
+                and 0 < len(command[1]) <= 8
+                and all(character.isprintable() for character in command[1])
+            ):
+                return command[1]
     return f"Macro {index}"
 
 
