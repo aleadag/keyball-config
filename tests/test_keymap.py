@@ -120,16 +120,14 @@ class KeyLegendTests(unittest.TestCase):
     def test_keyball_labels_have_an_authoritative_boundary(self) -> None:
         vil = fixture_vil({0: ["KC_A"]})
         expected = (
-            "Config Reset", "Config Save", "CPI +100", "CPI -100",
-            "CPI +1000", "CPI -1000", "Scroll Toggle", "Scroll Hold",
-            "Scroll Slower", "Scroll Faster", "Auto Mouse Toggle",
-            "Auto Mouse +50ms", "Auto Mouse -50ms", "Snap Vertical",
-            "Snap Horizontal", "Snap Free",
+            "DPI+", "DPI-", "Snp+", "Snp-", "Snp", "SnpT", "Drg", "DrgT",
+            "Drg+", "Drg-", "ATG", "A50", "A50-", "A100", "ATV", "TInfo",
+            "T_SAVE",
         )
         for index, label in enumerate(expected):
             with self.subTest(index=index):
                 self.assertEqual(_key_spec(f"QK_KB_{index}", vil), label)
-        self.assertEqual(_key_spec("QK_KB_16", vil), "QK_KB_16")
+        self.assertEqual(_key_spec("QK_KB_17", vil), "QK_KB_17")
         self.assertEqual(_key_spec("QK_USER_0", vil), "QK_USER_0")
 
     def test_modifier_labels_preserve_side_and_combinations(self) -> None:
@@ -312,7 +310,7 @@ class KeyLegendTests(unittest.TestCase):
 
     def test_unknown_and_malformed_values_are_not_repaired(self) -> None:
         vil = fixture_vil({0: ["KC_A"]})
-        for keycode in ("QK_KB_16", "MY_CUSTOM", "MT(MOD_LGUI)", "TD(99)"):
+        for keycode in ("QK_KB_17", "MY_CUSTOM", "MT(MOD_LGUI)", "TD(99)"):
             with self.subTest(keycode=keycode):
                 self.assertEqual(_key_spec(keycode, vil), keycode)
 
@@ -1598,7 +1596,7 @@ class RealRenderingIntegrationTests(unittest.TestCase):
                     }
                     for expected in (
                         ">", "2×=>", "Gui", "Mouse←", "PgDn",
-                        "ConfigReset", "SnapFree", "QK_KB_16",
+                        "DPI+", "TInfo", "T_SAVE",
                     ):
                         with self.subTest(expected=expected):
                             self.assertIn(expected, labels)
@@ -1610,7 +1608,7 @@ class RealRenderingIntegrationTests(unittest.TestCase):
                             self.assertNotIn(raw, text)
                     self.assertTrue(
                         labels.isdisjoint(
-                            {f"QK_KB_{index}" for index in range(16)}
+                            {f"QK_KB_{index}" for index in range(17)}
                         )
                     )
                     classes = {
