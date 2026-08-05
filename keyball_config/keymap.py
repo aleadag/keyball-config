@@ -399,9 +399,16 @@ def render_backup(
         vil = load_and_validate_vil(source, model)
         selected_layers = reachable_layers(vil, model.include_layers)
         positions = _physical_positions(model, vil)
-        geometry = _filtered_geometry(
-            tools.geometry_root / model.geometry_path, positions
-        )
+        pinned_geometry = tools.geometry_root / model.geometry_path
+        companion = source.with_suffix(".vial.json")
+        if companion.is_symlink():
+            raise ValueError(f"Vial definition companion is a symlink: {companion}")
+        if companion.exists():
+            geometry = _saved_kle_geometry(
+                companion, pinned_geometry, vil, model, positions
+            )
+        else:
+            geometry = _filtered_geometry(pinned_geometry, positions)
     except (OSError, ValueError) as error:
         raise RenderError(str(error)) from error
 
@@ -609,6 +616,195 @@ def _filtered_geometry(path: Path, positions: Sequence[tuple[str, int]]) -> byte
         json.dumps(geometry, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
         + "\n"
     ).encode()
+
+
+def _saved_kle_geometry(
+    definition_path: Path,
+    pinned_path: Path,
+    vil: Mapping[str, object],
+    model: ModelConfig,
+    positions: Sequence[tuple[str, int]],
+) -> bytes:
+    layout = vil.get("layout")
+    if not isinstance(layout, list) or not layout or not isinstance(layout[0], list):
+        raise ValueError("invalid Vial layout for saved geometry")
+    if not layout[0] or not isinstance(layout[0][0], list):
+        raise ValueError("invalid Vial layout for saved geometry")
+    matrix_shape = (len(layout[0]), len(layout[0][0]))
+    definition = load_and_validate_vial_definition(
+        definition_path, model, matrix_shape
+    )
+    try:
+        base = json.loads(_filtered_geometry(pinned_path, positions))
+    except (OSError, ValueError, json.JSONDecodeError) as error:
+        raise ValueError(f"invalid pinned geometry {pinned_path}: {error}") from error
+
+    coordinates = {
+        (index // matrix_shape[1], index % matrix_shape[1]): label
+        for label, index in positions
+    }
+    active_options = _active_kle_options(definition, vil)
+    selected: dict[tuple[int, int], tuple[dict[str, object], tuple[int, int] | None]] = {}
+    option_defaults: dict[int, tuple[float | int, float | int]] = {}
+    x_pos: float | int = 0
+    y_pos: float | int = 0
+    rx: float | int = 0
+    ry: float | int = 0
+    w: float | int = 1
+    h: float | int = 1
+    r: float | int = 0
+    decal = False
+
+    layouts = definition["layouts"]
+    assert isinstance(layouts, dict)
+    keymap = layouts["keymap"]
+    assert isinstance(keymap, list)
+    for row in keymap:
+        assert isinstance(row, list)
+        for item in row:
+            if isinstance(item, dict):
+                for key, value in item.items():
+                    if key == "x":
+                        x_pos += value  # type: ignore[operator]
+                    elif key == "y":
+                        y_pos += value  # type: ignore[operator]
+                    elif key == "w":
+                        w = value  # type: ignore[assignment]
+                    elif key == "h":
+                        h = value  # type: ignore[assignment]
+                    elif key == "r":
+                        r = value  # type: ignore[assignment]
+                    elif key == "rx":
+                        rx = value  # type: ignore[assignment]
+                        x_pos = rx
+                        y_pos = ry
+                    elif key == "ry":
+                        ry = value  # type: ignore[assignment]
+                        x_pos = rx
+                        y_pos = ry
+                    elif key == "d":
+                        decal = value  # type: ignore[assignment]
+                continue
+
+            parts = item.split("\n")
+            wire = _kle_wire_coordinate(parts[0], matrix_shape)
+            if wire is None:
+                raise ValueError("invalid Vial definition key wire coordinate")
+            option = _kle_option(parts, layouts.get("labels"))
+            if option is not None and option[1] == 0:
+                option_defaults.setdefault(option[0], (x_pos, y_pos))
+            if (
+                wire in coordinates
+                and not decal
+                and (option is None or option in active_options)
+            ):
+                if wire in selected:
+                    raise ValueError(
+                        f"saved Vial geometry contains duplicate key {parts[0]}"
+                    )
+                geometry: dict[str, object] = {
+                    "label": coordinates[wire],
+                    "x": x_pos,
+                    "y": y_pos,
+                    "w": w,
+                    "h": h,
+                }
+                if r != 0:
+                    geometry.update({"r": r, "rx": rx, "ry": ry})
+                selected[wire] = (geometry, option)
+            x_pos += w  # type: ignore[operator]
+            w = 1
+            h = 1
+            decal = False
+        y_pos += 1
+        x_pos = rx
+
+    deltas: dict[int, tuple[float | int, float | int]] = {}
+    for geometry, option in selected.values():
+        if option is None:
+            continue
+        default = option_defaults.get(option[0])
+        if default is None:
+            continue
+        if option[0] not in deltas:
+            delta = (geometry["x"] - default[0], geometry["y"] - default[1])
+            geometry["x"], geometry["y"] = default
+            deltas[option[0]] = delta
+        else:
+            delta = deltas[option[0]]
+            geometry["x"] -= delta[0]  # type: ignore[operator]
+            geometry["y"] -= delta[1]  # type: ignore[operator]
+
+    missing = [label for coordinate, label in coordinates.items() if coordinate not in selected]
+    if missing:
+        raise ValueError(
+            "saved Vial geometry is missing reviewed keys: " + ", ".join(missing)
+        )
+    base["layouts"] = {
+        "LAYOUT_no_ball": {
+            "layout": [selected[divmod(index, matrix_shape[1])][0] for _, index in positions]
+        }
+    }
+    return (
+        json.dumps(base, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+        + "\n"
+    ).encode()
+
+
+def _active_kle_options(
+    definition: Mapping[str, object], vil: Mapping[str, object]
+) -> set[tuple[int, int]]:
+    layouts = definition.get("layouts")
+    if not isinstance(layouts, dict):
+        raise ValueError("invalid Vial definition layouts")
+    labels = layouts.get("labels")
+    if labels is None:
+        return set()
+    if not isinstance(labels, list):
+        raise ValueError("invalid Vial definition labels")
+    state = vil.get("layout_options", 0)
+    if state is None or state == -1:
+        state = 0
+    if not isinstance(state, int) or isinstance(state, bool) or state < 0:
+        raise ValueError("invalid Vial layout_options state")
+
+    options: list[tuple[int, int]] = []
+    start_bit = 0
+    for label in reversed(labels):
+        variant_count = 2 if isinstance(label, str) else len(label) - 1
+        options.append((variant_count, start_bit))
+        start_bit += variant_count - 1
+    options.reverse()
+
+    active: set[tuple[int, int]] = set()
+    for index, (variant_count, bit) in enumerate(options):
+        if variant_count > 1:
+            bits = (state >> bit) & ((1 << (variant_count - 1)) - 1)
+            if bits == 0:
+                active.add((index, 0))
+            elif bits & (bits - 1) == 0:
+                active.add((index, bits.bit_length()))
+        else:
+            active.add((index, 0))
+    return active
+
+
+def _kle_option(
+    parts: Sequence[str], labels: object
+) -> tuple[int, int] | None:
+    if len(parts) < 4 or not parts[3]:
+        return None
+    match = re.fullmatch(r"(\d+),(\d+)", parts[3])
+    if match is None:
+        raise ValueError(f"invalid Vial layout option {parts[3]!r}")
+    group, variant = (int(value) for value in match.groups())
+    if not isinstance(labels, list) or group >= len(labels):
+        raise ValueError(f"invalid Vial layout option group {group}")
+    label = labels[group]
+    variant_count = 2 if isinstance(label, str) else len(label) - 1
+    if variant >= variant_count:
+        raise ValueError(f"invalid Vial layout option variant {variant}")
+    return group, variant
 
 
 def _normalize_converter_yaml(
@@ -900,6 +1096,117 @@ def load_and_validate_vil(path: Path, model: ModelConfig) -> dict[str, object]:
             f"matrix shape {expected_shape} is not allowed for {model.slug}"
         )
     return raw
+
+
+def load_and_validate_vial_definition(
+    path: Path,
+    model: ModelConfig,
+    matrix_shape: tuple[int, int],
+) -> dict[str, object]:
+    try:
+        raw = json.loads(path.read_text())
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError(f"invalid Vial definition {path}: {error}") from error
+    if not isinstance(raw, dict):
+        raise ValueError(f"invalid Vial definition for {model.slug}: root must be an object")
+
+    matrix = raw.get("matrix")
+    if not isinstance(matrix, dict):
+        raise ValueError(f"invalid Vial definition for {model.slug}: missing matrix")
+    rows = matrix.get("rows")
+    columns = matrix.get("cols")
+    if (
+        not isinstance(rows, int)
+        or isinstance(rows, bool)
+        or not isinstance(columns, int)
+        or isinstance(columns, bool)
+        or (rows, columns) != matrix_shape
+    ):
+        raise ValueError(
+            f"invalid Vial definition for {model.slug}: matrix shape does not match backup"
+        )
+
+    layouts = raw.get("layouts")
+    if not isinstance(layouts, dict):
+        raise ValueError(f"invalid Vial definition for {model.slug}: missing layouts")
+    keymap = layouts.get("keymap")
+    if not isinstance(keymap, list) or not keymap:
+        raise ValueError(
+            f"invalid Vial definition for {model.slug}: layouts.keymap must be non-empty"
+        )
+    for row_index, row in enumerate(keymap):
+        if not isinstance(row, list) or not row:
+            raise ValueError(
+                f"invalid Vial definition for {model.slug}: keymap row {row_index} is invalid"
+            )
+        for item_index, item in enumerate(row):
+            if isinstance(item, str):
+                if _kle_wire_coordinate(item.split("\n", 1)[0], matrix_shape) is None:
+                    raise ValueError(
+                        f"invalid Vial definition for {model.slug}: keymap item "
+                        f"{row_index}/{item_index} has an invalid wire coordinate"
+                    )
+            elif isinstance(item, dict):
+                _validate_kle_object(item, model.slug, row_index, item_index)
+            else:
+                raise ValueError(
+                    f"invalid Vial definition for {model.slug}: keymap item "
+                    f"{row_index}/{item_index} must be a string or object"
+                )
+
+    labels = layouts.get("labels")
+    if labels is not None:
+        if not isinstance(labels, list):
+            raise ValueError(
+                f"invalid Vial definition for {model.slug}: layouts.labels must be an array"
+            )
+        for index, label in enumerate(labels):
+            if isinstance(label, str):
+                continue
+            if (
+                isinstance(label, list)
+                and len(label) >= 2
+                and all(isinstance(variant, str) for variant in label)
+            ):
+                continue
+            raise ValueError(
+                f"invalid Vial definition for {model.slug}: layouts.labels[{index}] is invalid"
+            )
+    return raw
+
+
+def _validate_kle_object(
+    item: Mapping[str, object], model_slug: str, row_index: int, item_index: int
+) -> None:
+    numeric = {"x", "y", "w", "h", "r", "rx", "ry"}
+    for key, value in item.items():
+        if key in numeric and (
+            not isinstance(value, (int, float)) or isinstance(value, bool)
+        ):
+            raise ValueError(
+                f"invalid Vial definition for {model_slug}: keymap object "
+                f"{row_index}/{item_index}.{key} must be numeric"
+            )
+        if key == "d" and not isinstance(value, bool):
+            raise ValueError(
+                f"invalid Vial definition for {model_slug}: keymap object "
+                f"{row_index}/{item_index}.d must be boolean"
+            )
+        if key == "c" and not isinstance(value, str):
+            raise ValueError(
+                f"invalid Vial definition for {model_slug}: keymap object "
+                f"{row_index}/{item_index}.c must be a string"
+            )
+
+
+def _kle_wire_coordinate(
+    value: str, matrix_shape: tuple[int, int]
+) -> tuple[int, int] | None:
+    match = re.fullmatch(r"(\d+),(\d+)", value)
+    if match is None:
+        return None
+    row, column = (int(part) for part in match.groups())
+    return (row, column) if row < matrix_shape[0] and column < matrix_shape[1] else None
 
 
 def reachable_layers(

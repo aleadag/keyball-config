@@ -83,6 +83,62 @@ def fixture_vil(layers: dict[int, list[str]]) -> dict[str, object]:
     }
 
 
+def write_kle_definition(
+    path: Path,
+    *,
+    rotated_first_key: bool = False,
+    labels: list[object] | None = None,
+    first_key_option: str | None = None,
+) -> None:
+    rows: list[list[object]] = []
+    for row in range(8):
+        items: list[object] = []
+        for column in range(6):
+            if row == 0 and column == 0 and first_key_option is not None:
+                items.append({"x": 3})
+            if rotated_first_key and row == 0 and column == 0:
+                items.append({"r": 10, "rx": 0, "ry": 0})
+            label = f"{row},{column}"
+            if row == 0 and column == 0 and first_key_option is not None:
+                label += f"\n\n\n{first_key_option}"
+            items.append(label)
+            if rotated_first_key and row == 0 and column == 0:
+                items.append({"r": 0})
+        rows.append(items)
+    definition = {
+        "matrix": {"rows": 8, "cols": 6},
+        "layouts": {"keymap": rows},
+    }
+    if labels is not None:
+        definition["layouts"]["labels"] = labels
+    path.write_text(json.dumps(definition, separators=(",", ":")))
+
+
+def render_with_companion(
+    runner: "FakeRenderRunner", *, rotated_first_key: bool = False
+) -> dict[str, object]:
+    with tempfile.TemporaryDirectory() as directory:
+        root = Path(directory)
+        source = root / "keyball44.vil"
+        source.write_bytes((FIXTURES / "valid-keyball44.vil").read_bytes())
+        write_kle_definition(
+            root / "keyball44.vial.json", rotated_first_key=rotated_first_key
+        )
+        output = root / "keyball44.svg"
+        render_backup(
+            source,
+            output,
+            load_registry(Path("config/models.json"))["keyball44"],
+            RenderTools(
+                converter=Path("/tools/vial-converter"),
+                keymap=Path("/tools/keymap"),
+                geometry_root=CONVERTER_FIXTURES,
+            ),
+            runner,
+        )
+    return json.loads(runner.geometry_inputs[0])
+
+
 class KeyLegendTests(unittest.TestCase):
     def test_friendly_atomic_labels(self) -> None:
         vil = fixture_vil({0: ["KC_A"]})
@@ -1227,6 +1283,60 @@ class RenderingTests(unittest.TestCase):
                 self.assertEqual(first.read_bytes(), second.read_bytes())
                 self.assertEqual(runner.keymap_inputs[0], runner.keymap_inputs[1])
                 self.assertEqual(runner.converter_inputs[0], runner.converter_inputs[1])
+
+    def test_saved_kle_geometry_preserves_rotation(self) -> None:
+        runner = FakeRenderRunner()
+
+        geometry = render_with_companion(runner, rotated_first_key=True)
+
+        first = geometry["layouts"]["LAYOUT_no_ball"]["layout"][0]
+        self.assertEqual(first["label"], "L00")
+        self.assertEqual(first["r"], 10)
+
+    def test_saved_kle_geometry_selects_active_layout_option(self) -> None:
+        runner = FakeRenderRunner()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "keyball44.vil"
+            vil = json.loads((FIXTURES / "valid-keyball44.vil").read_text())
+            vil["layout_options"] = 1
+            source.write_text(json.dumps(vil))
+            write_kle_definition(
+                root / "keyball44.vial.json",
+                labels=[["Ball availability", "None", "Right"]],
+                first_key_option="0,1",
+            )
+            render_backup(
+                source,
+                root / "keyball44.svg",
+                self.models["keyball44"],
+                self.tools,
+                runner,
+            )
+
+        geometry = json.loads(runner.geometry_inputs[0])
+        first = geometry["layouts"]["LAYOUT_no_ball"]["layout"][0]
+        self.assertEqual(first["label"], "L00")
+        self.assertEqual(first["x"], 3)
+
+    def test_malformed_saved_definition_fails_before_converter(self) -> None:
+        runner = FakeRenderRunner()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            source = root / "keyball44.vil"
+            source.write_bytes((FIXTURES / "valid-keyball44.vil").read_bytes())
+            (root / "keyball44.vial.json").write_text("{}")
+
+            with self.assertRaisesRegex(RenderError, "invalid Vial definition"):
+                render_backup(
+                    source,
+                    root / "keyball44.svg",
+                    self.models["keyball44"],
+                    self.tools,
+                    runner,
+                )
+
+        self.assertEqual(runner.calls, [])
 
     def test_sparse_placeholder_layers_are_not_rendered(self) -> None:
         runner = FakeRenderRunner()

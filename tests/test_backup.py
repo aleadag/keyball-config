@@ -24,6 +24,28 @@ KEYBALL44_DEVICES = (FIXTURES / "devices" / "trackball-44-v3.txt").read_text()
 KEYBALL39_DEVICES = (FIXTURES / "devices" / "keyball-39.txt").read_text()
 
 
+def definition_bytes(rows: int = 8, columns: int = 6) -> bytes:
+    return (
+        json.dumps(
+            {
+                "matrix": {"rows": rows, "cols": columns},
+                "layouts": {
+                    "keymap": [
+                        [f"{row},{column}" for column in range(columns)]
+                        for row in range(rows)
+                    ]
+                },
+            },
+            separators=(",", ":"),
+        )
+        + "\n"
+    ).encode()
+
+
+VALID_KEYBALL44_DEFINITION = definition_bytes()
+VALID_KEYBALL39_DEFINITION = definition_bytes()
+
+
 OutputAction = Callable[[Path], None]
 
 
@@ -39,6 +61,7 @@ class FakeRunner:
         save_success_markers: int = 1,
         save_trailing: str = "",
         output: bytes | None = VALID_KEYBALL44,
+        definition: bytes | None = VALID_KEYBALL44_DEFINITION,
         output_action: OutputAction | None = None,
         after_save: OutputAction | None = None,
         during_final_status: OutputAction | None = None,
@@ -54,17 +77,21 @@ class FakeRunner:
         self.save_success_markers = save_success_markers
         self.save_trailing = save_trailing
         self.output = output
+        self.definition = definition
         self.output_action = output_action
         self.after_save = after_save
         self.during_final_status = during_final_status
         self.save_error = save_error
         self.calls: list[tuple[tuple[str, ...], Path]] = []
         self.save_paths: list[Path] = []
+        self.definition_paths: list[Path] = []
         self.save_dirs: list[Path] = []
         self.save_dir_modes: list[int] = []
         self.save_path_existed: bool | None = None
         self._status_index = 0
         self._tracked_index = 0
+        self._during_final_status_called = False
+        self._save_has_definition = False
 
     @staticmethod
     def _results(
@@ -89,11 +116,13 @@ class FakeRunner:
         if command[:3] == ("git", "--literal-pathspecs", "status"):
             assert self.status is not None
             if (
-                self._status_index == 1
+                self._status_index >= (2 if self._save_has_definition else 1)
+                and not self._during_final_status_called
                 and self.during_final_status is not None
                 and self.save_paths
             ):
                 self.during_final_status(self.save_paths[-1])
+                self._during_final_status_called = True
             result = self._next(self.status, self._status_index)
             self._status_index += 1
             return result
@@ -106,19 +135,29 @@ class FakeRunner:
         if len(command) >= 6 and command[:2] == ("vitaly", "-i"):
             if self.save_error is not None:
                 raise self.save_error
-            output_path = Path(command[-1])
-            self.save_paths.append(output_path)
-            self.save_dirs.append(output_path.parent)
-            self.save_dir_modes.append(
-                stat.S_IMODE(output_path.parent.stat().st_mode)
+            self._save_has_definition = "-d" in command
+            vil_path = Path(command[command.index("-f") + 1])
+            definition_path = (
+                Path(command[command.index("-d") + 1])
+                if "-d" in command
+                else None
             )
-            self.save_path_existed = output_path.exists() or output_path.is_symlink()
+            self.save_paths.append(vil_path)
+            if definition_path is not None:
+                self.definition_paths.append(definition_path)
+            self.save_dirs.append(vil_path.parent)
+            self.save_dir_modes.append(
+                stat.S_IMODE(vil_path.parent.stat().st_mode)
+            )
+            self.save_path_existed = vil_path.exists() or vil_path.is_symlink()
             if self.output_action is not None:
-                self.output_action(output_path)
+                self.output_action(vil_path)
             elif self.output is not None:
-                output_path.write_bytes(self.output)
+                vil_path.write_bytes(self.output)
+            if definition_path is not None and self.definition is not None:
+                definition_path.write_bytes(self.definition)
             if self.after_save is not None:
-                self.after_save(output_path)
+                self.after_save(vil_path)
             if self.save is not None:
                 return self.save
             save_devices = (
@@ -126,7 +165,7 @@ class FakeRunner:
                 if self.save_devices is None
                 else self.save_devices
             )
-            success = f"Configuration saved to file {output_path}\n"
+            success = f"Configuration saved to file {vil_path}\n"
             stdout = (
                 save_devices
                 + "\n"
@@ -170,6 +209,9 @@ class BackupTests(unittest.TestCase):
         for save_path in runner.save_paths:
             self.assertFalse(save_path.exists())
             self.assertFalse(save_path.is_symlink())
+        for definition_path in runner.definition_paths:
+            self.assertFalse(definition_path.exists())
+            self.assertFalse(definition_path.is_symlink())
         for save_dir in runner.save_dirs:
             self.assertFalse(save_dir.exists())
 
@@ -187,6 +229,10 @@ class BackupTests(unittest.TestCase):
         target = self.repo / "keyball44.vil"
         self.assertEqual(result, target)
         self.assertEqual(target.read_bytes(), VALID_KEYBALL44)
+        self.assertEqual(
+            (self.repo / "keyball44.vial.json").read_bytes(),
+            VALID_KEYBALL44_DEFINITION,
+        )
         self.assertFalse((self.repo / "keyball39.vil").exists())
         status_command = (
             "git",
@@ -199,13 +245,93 @@ class BackupTests(unittest.TestCase):
         )
         self.assertEqual([call[0] for call in runner.calls].count(status_command), 2)
         self.assertFalse(any("ls-files" in call[0] for call in runner.calls))
-        self.assertIn(
-            ("vitaly", "-i", "16718", "save", "-f"),
-            [call[0][:-1] for call in runner.calls],
+        self.assertTrue(
+            any(
+                call[0][:5] == ("vitaly", "-i", "16718", "save", "-f")
+                for call in runner.calls
+            )
+        )
+        self.assertTrue(
+            any(
+                "-d" in call[0]
+                for call in runner.calls
+                if call[0][:2] == ("vitaly", "-i")
+            )
         )
         self.assertEqual(runner.save_paths[0].parent.parent, self.repo)
         self.assertEqual(runner.save_dir_modes, [0o700])
         self.assertFalse(runner.save_path_existed)
+        self.assert_temporary_paths_removed(runner)
+
+    def test_dirty_companion_target_is_refused_before_export(self) -> None:
+        companion = self.repo / "keyball44.vial.json"
+        runner = FakeRunner(
+            status=(
+                CommandResult(0, "", ""),
+                CommandResult(0, "?? keyball44.vial.json\n", ""),
+            )
+        )
+
+        with self.assertRaisesRegex(BackupError, "changed target keyball44.vial.json"):
+            backup(self.repo, REGISTRY, runner)
+
+        self.assertFalse(runner.save_paths)
+        self.assertFalse(companion.exists())
+
+    def test_malformed_companion_preserves_existing_pair(self) -> None:
+        target = self.repo / "keyball44.vil"
+        companion = self.repo / "keyball44.vial.json"
+        old_vil = b"old backup"
+        old_definition = b"old definition"
+        target.write_bytes(old_vil)
+        companion.write_bytes(old_definition)
+        runner = FakeRunner(definition=b"{}")
+
+        with self.assertRaisesRegex(BackupError, "invalid Vial definition"):
+            backup(self.repo, REGISTRY, runner)
+
+        self.assertEqual(target.read_bytes(), old_vil)
+        self.assertEqual(companion.read_bytes(), old_definition)
+        self.assert_temporary_paths_removed(runner)
+
+    def test_companion_created_during_export_is_refused(self) -> None:
+        companion = self.repo / "keyball44.vial.json"
+
+        def create_companion(_: Path) -> None:
+            companion.write_bytes(b"concurrent definition")
+
+        runner = FakeRunner(after_save=create_companion)
+
+        with self.assertRaisesRegex(BackupError, "target keyball44.vial.json changed"):
+            backup(self.repo, REGISTRY, runner)
+
+        self.assertEqual(companion.read_bytes(), b"concurrent definition")
+        self.assert_temporary_paths_removed(runner)
+
+    def test_failed_pair_replacement_rolls_back_both_targets(self) -> None:
+        target = self.repo / "keyball44.vil"
+        companion = self.repo / "keyball44.vial.json"
+        old_vil = b"old backup"
+        old_definition = b"old definition"
+        target.write_bytes(old_vil)
+        companion.write_bytes(old_definition)
+        runner = FakeRunner()
+        real_replace = os.replace
+        replace_calls = 0
+
+        def fail_on_companion_install(*args, **kwargs):
+            nonlocal replace_calls
+            replace_calls += 1
+            if replace_calls == 4:
+                raise OSError("simulated companion replacement failure")
+            return real_replace(*args, **kwargs)
+
+        with patch("keyball_config.backup.os.replace", side_effect=fail_on_companion_install):
+            with self.assertRaisesRegex(BackupError, "atomically replace backup pair"):
+                backup(self.repo, REGISTRY, runner)
+
+        self.assertEqual(target.read_bytes(), old_vil)
+        self.assertEqual(companion.read_bytes(), old_definition)
         self.assert_temporary_paths_removed(runner)
 
     def test_clean_tracked_existing_backup_is_replaced(self) -> None:

@@ -22,7 +22,9 @@
         "scripts"
         "tests"
         "keyball39.vil"
+        "keyball39.vial.json"
         "keyball44.vil"
+        "keyball44.vial.json"
       ];
       excludedSourceNames = [
         ".cache"
