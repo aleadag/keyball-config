@@ -137,6 +137,56 @@ class KeyLegendTests(unittest.TestCase):
         self.assertEqual(_friendly_modifiers("KC_NO"), "")
         self.assertIsNone(_friendly_modifiers("MOD_LGUI|MOD_RALT"))
 
+    def test_modifier_labels_drop_only_the_matching_physical_side(self) -> None:
+        vil = fixture_vil({0: ["KC_A"]})
+        cases = (
+            ("KC_LEFT_CTRL", "L", "Ctrl"),
+            ("KC_RIGHT_CTRL", "R", "Ctrl"),
+            ("KC_LEFT_SHIFT", "L", "Shift"),
+            ("KC_RIGHT_SHIFT", "R", "Shift"),
+            ("KC_LEFT_ALT", "L", "Alt"),
+            ("KC_RIGHT_ALT", "R", "Alt"),
+            ("KC_LEFT_GUI", "L", "Gui"),
+            ("KC_RIGHT_GUI", "R", "Gui"),
+            ("KC_LEFT_CTRL", "R", "LCtrl"),
+            ("KC_RIGHT_CTRL", "L", "RCtrl"),
+        )
+        for keycode, physical_side, expected in cases:
+            with self.subTest(keycode=keycode, physical_side=physical_side):
+                self.assertEqual(_key_spec(keycode, vil, physical_side), expected)
+
+        self.assertEqual(
+            _key_spec("MT(MOD_LCTL,KC_A)", vil, "L"),
+            {"t": "A", "h": "Ctrl"},
+        )
+        self.assertEqual(_key_spec("LCTL(KC_A)", vil, "L"), "Ctrl+A")
+
+    def test_nested_modifier_labels_drop_matching_physical_side(self) -> None:
+        vil = fixture_vil({0: ["KC_A"]})
+        cases = (
+            (
+                "MT(MOD_LCTL|MOD_LSFT,KC_A)",
+                "L",
+                {"t": "A", "h": "Ctrl+Shift"},
+            ),
+            (
+                "OSM(MOD_LALT|MOD_LGUI)",
+                "L",
+                {"t": "Alt+Gui", "h": "one-shot"},
+            ),
+            ("LM(8,MOD_LALT|MOD_LGUI)", "L", {"t": "L8", "h": "Alt+Gui"}),
+            ("LCAG(KC_A)", "L", "Ctrl+Alt+Gui+A"),
+            ("RCS(KC_A)", "L", "RCtrl+RShift+A"),
+            (
+                "MT(MOD_RALT|MOD_RGUI,KC_ENTER)",
+                "R",
+                {"t": "Enter", "h": "Alt+Gui"},
+            ),
+        )
+        for keycode, physical_side, expected in cases:
+            with self.subTest(keycode=keycode, physical_side=physical_side):
+                self.assertEqual(_key_spec(keycode, vil, physical_side), expected)
+
     def test_modifier_labels_require_canonical_vial_spelling(self) -> None:
         vil = fixture_vil({0: ["KC_A"]})
         for modifiers in ("MOD_LGUI|MOD_LGUI", "MOD_LSFT|MOD_LCTL"):
@@ -778,10 +828,45 @@ class NormalizationTests(unittest.TestCase):
         normalized = _normalize_converter_yaml(
             converted, vil, (0,), (("L00", 0), ("L01", 1)), 2
         ).decode()
-        self.assertIn('{"h":"LGui","t":"A"}', normalized)
+        self.assertIn('{"h":"Gui","t":"A"}', normalized)
         self.assertIn('    - "PgDn"', normalized)
         self.assertNotIn("MT+", normalized)
         self.assertNotIn("MOD_LGUI", normalized)
+
+    def test_layer_modifier_labels_use_physical_side_but_combo_outputs_do_not(self) -> None:
+        vil = fixture_vil(
+            {
+                0: [
+                    "KC_LEFT_CTRL",
+                    "KC_RIGHT_CTRL",
+                    "KC_A",
+                    "KC_B",
+                ]
+            }
+        )
+        vil["combo"] = [["KC_A", "KC_B", "KC_NO", "KC_NO", "KC_RIGHT_CTRL"]]
+        converted = (
+            "layout: {}\n"
+            "layers:\n"
+            "  L0:\n"
+            '    - "converter-left"\n'
+            '    - "converter-right"\n'
+            '    - "A"\n'
+            '    - "B"\n'
+            "combos:\n"
+            '  - {"k":"converter-combo","l":["L0"],"p":[2,3]}\n'
+        )
+        normalized = _normalize_converter_yaml(
+            converted,
+            vil,
+            (0,),
+            (("L00", 0), ("R00", 1), ("L01", 2), ("R01", 3)),
+            4,
+        ).decode()
+
+        self.assertIn('    - "Ctrl"', normalized)
+        self.assertEqual(normalized.count('    - "Ctrl"'), 2)
+        self.assertIn('"k":"RCtrl"', normalized)
 
     def test_combo_outputs_are_correlated_and_translated(self) -> None:
         vil = fixture_vil({0: ["KC_A", "KC_B"]})
@@ -1508,7 +1593,7 @@ class RealRenderingIntegrationTests(unittest.TestCase):
                         if local_name(element) == "text"
                     }
                     for expected in (
-                        ">", "2×=>", "LGui", "Mouse←", "PgDn",
+                        ">", "2×=>", "Gui", "Mouse←", "PgDn",
                         "ConfigReset", "SnapFree", "QK_KB_16",
                     ):
                         with self.subTest(expected=expected):
@@ -1535,7 +1620,7 @@ class RealRenderingIntegrationTests(unittest.TestCase):
                         for group in root.iter()
                         if local_name(group) == "g"
                         and "key" in class_tokens(group)
-                        and {"A", "LGui"}
+                        and {"A", "Gui"}
                         <= {
                             label(element)
                             for element in group.iter()
@@ -1553,7 +1638,7 @@ class RealRenderingIntegrationTests(unittest.TestCase):
                         element
                         for element in home_row.iter()
                         if local_name(element) == "text"
-                        and label(element) == "LGui"
+                        and label(element) == "Gui"
                     ]
                     self.assertEqual(len(taps), 1)
                     self.assertEqual(len(holds), 1)
