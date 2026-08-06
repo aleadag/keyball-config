@@ -22,6 +22,7 @@ from keyball_config.vitaly_v6_keycodes import (
 KeySpec = str | dict[str, str]
 
 _LAYER_ACTIONS = {"MO", "LT", "TG", "TO", "DF", "PDF", "OSL", "LM", "TT"}
+_MACRO_DISPLAY_LIMIT = 6
 _KEYBALL_NON_LAYER_KEYCODES = {
     *(f"QK_KB_{index}" for index in range(10)),
     *(f"QK_KB_{index}" for index in range(11, 17)),
@@ -237,14 +238,20 @@ def _tap_text(spec: KeySpec, fallback: str) -> str:
     return spec.get("t", fallback)
 
 
-def _macro_label(keycode: str, vil: Mapping[str, object]) -> str | None:
+def _macro_legend(text: str, *, truncate: bool = True) -> KeySpec:
+    if truncate and len(text) > _MACRO_DISPLAY_LIMIT:
+        text = text[: _MACRO_DISPLAY_LIMIT - 1] + "…"
+    return {"t": text, "tr": "M"}
+
+
+def _macro_label(keycode: str, vil: Mapping[str, object]) -> KeySpec | None:
     match = re.fullmatch(r"QK_MACRO_(\d+)", keycode)
     if match is None or not _canonical_number(match[1], 31):
         return None
     index = int(match[1])
     macros = vil.get("macro", [])
     if not isinstance(macros, list) or index >= len(macros):
-        return f"Macro {index}"
+        return _macro_legend(f"Macro {index}", truncate=False)
     macro = macros[index]
     if isinstance(macro, list):
         for command in macro:
@@ -256,8 +263,8 @@ def _macro_label(keycode: str, vil: Mapping[str, object]) -> str | None:
                 and 0 < len(command[1]) <= 8
                 and all(character.isprintable() for character in command[1])
             ):
-                return command[1]
-    return f"Macro {index}"
+                return _macro_legend(command[1])
+    return _macro_legend(f"Macro {index}", truncate=False)
 
 
 class _TapDanceCycle(Exception):

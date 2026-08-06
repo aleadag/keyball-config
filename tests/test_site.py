@@ -160,6 +160,8 @@ class SiteTests(unittest.TestCase):
             "2×",
             "T+H",
             "Mouse",
+            "top-right",
+            "shortened to six characters",
             "raw keycode",
         ):
             with self.subTest(text=text):

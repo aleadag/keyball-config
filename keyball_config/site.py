@@ -58,6 +58,8 @@ a { color: inherit; }
 _KEYMAP_LEGEND = """<aside class="legend" aria-label="Key legend">
 <strong>Legend:</strong> Center = tap; bottom = hold; <code>2×</code> = double tap;
 <code>T+H</code> = tap-hold. <code>L</code>/<code>R</code> preserve modifier side.
+<code>M</code> in the top-right marks a macro; <code>…</code> means its text was
+shortened to six characters.
 Mouse arrows show movement and Mouse numbers show buttons. Named Keyball actions
 control trackball or saved configuration behavior; a raw keycode means no
 authoritative friendly name is available.

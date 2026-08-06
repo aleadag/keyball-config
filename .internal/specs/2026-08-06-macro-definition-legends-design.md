@@ -40,3 +40,16 @@ checks, including the real rendering checks.
   keycap legend.
 - Adding a separate macro reference table to the generated site.
 - Changing macro validation, backup format, converter behavior, or geometry.
+
+## Follow-up decision (2026-08-06)
+
+Macro legends use the native keymap-drawer corner field `tr`: the generated
+spec is `{"t": "<label>", "tr": "M"}`. The top-right `M` distinguishes a
+macro from friendly app-key labels without widening the main legend.
+
+The displayed macro text command is limited to six characters. Text longer
+than six characters keeps its first five characters and receives the
+single-character ellipsis `…`; the original macro text remains unchanged in
+the canonical Vial backup. Generic `Macro <index>` fallbacks retain their
+index and are not truncated. The generated site legend explains both the `M`
+marker and the ellipsis.

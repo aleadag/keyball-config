@@ -343,8 +343,8 @@ class KeyLegendTests(unittest.TestCase):
         vil = fixture_vil({0: ["KC_A"]})
         vil["macro"] = [[["text", "M"]] for _ in range(100)]
         self.assertEqual(_key_spec("QK_KB_00", vil), "QK_KB_00")
-        self.assertEqual(_key_spec("QK_MACRO_0", vil), "M")
-        self.assertEqual(_key_spec("QK_MACRO_31", vil), "M")
+        self.assertEqual(_key_spec("QK_MACRO_0", vil), {"t": "M", "tr": "M"})
+        self.assertEqual(_key_spec("QK_MACRO_31", vil), {"t": "M", "tr": "M"})
         for keycode in ("QK_MACRO_00", "QK_MACRO_32", "QK_MACRO_99"):
             with self.subTest(keycode=keycode):
                 self.assertEqual(_key_spec(keycode, vil), keycode)
@@ -353,13 +353,34 @@ class KeyLegendTests(unittest.TestCase):
         vil = fixture_vil({0: ["KC_A"]})
         vil["macro"] = [[["tap", "KC_ENTER"], ["text", "accept"]]]
 
-        self.assertEqual(_key_spec("QK_MACRO_0", vil), "accept")
+        self.assertEqual(
+            _key_spec("QK_MACRO_0", vil),
+            {"t": "accept", "tr": "M"},
+        )
+
+    def test_long_macro_text_is_shortened_to_six_characters(self) -> None:
+        vil = fixture_vil({0: ["KC_A"]})
+        vil["macro"] = [[["text", "Continue"]]]
+
+        self.assertEqual(
+            _key_spec("QK_MACRO_0", vil),
+            {"t": "Conti…", "tr": "M"},
+        )
+
+        vil["macro"] = [[["text", "Accept"]]]
+        self.assertEqual(
+            _key_spec("QK_MACRO_0", vil),
+            {"t": "Accept", "tr": "M"},
+        )
 
     def test_macros_without_text_keep_the_generic_label(self) -> None:
         vil = fixture_vil({0: ["KC_A"]})
         vil["macro"] = [[["tap", "KC_ENTER"], ["delay", 100]]]
 
-        self.assertEqual(_key_spec("QK_MACRO_0", vil), "Macro 0")
+        self.assertEqual(
+            _key_spec("QK_MACRO_0", vil),
+            {"t": "Macro 0", "tr": "M"},
+        )
 
     def test_composites_preserve_empty_keycode_labels(self) -> None:
         vil = fixture_vil({0: ["KC_A"]})

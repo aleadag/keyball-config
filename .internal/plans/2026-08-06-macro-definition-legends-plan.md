@@ -134,3 +134,49 @@ git status -sb
 Expected: no whitespace errors, the macro helper and focused tests are the
 only implementation changes, and no generated render output is left in the
 repository.
+
+## Follow-up amendment: compact marked macro legends
+
+**Goal:** Keep macro names visually distinct from app-key names while fitting
+the six-character center-label budget observed in the Keyball rendering.
+
+**Architecture:** `_macro_label` returns the native keymap-drawer structure
+`{"t": label, "tr": "M"}` for every recognized macro, including generic
+fallbacks. A six-character display helper preserves macro text up to six
+characters and converts longer printable text to `text[:5] + "…"`; generic
+`Macro <index>` fallbacks retain their index without truncation. The site
+legend explains the top-right marker and shortened labels.
+
+### Follow-up Task 1: Test marked and shortened macro labels
+
+**Files:**
+- Modify: `tests/test_keymap.py` in `KeyLegendTests`
+- Modify: `tests/test_site.py` in the fixed-legend assertions
+
+**Acceptance Criteria:**
+- Direct macro labels use `t` for text and `tr` for `M`.
+- `Continue` becomes `Conti…`; six-character or shorter labels remain intact.
+- Generic macro fallbacks also carry `tr: M`.
+- `_KEYMAP_LEGEND` explains both conventions.
+
+### Follow-up Task 2: Implement the minimal native keymap-drawer spec
+
+**Files:**
+- Modify: `keyball_config/keymap.py` in `_macro_label`
+- Modify: `keyball_config/site.py` in `_KEYMAP_LEGEND`
+
+**Acceptance Criteria:**
+- Macro definitions and backups are unchanged.
+- Only generated legends gain the marker and display truncation.
+- Existing tap-dance corner annotations and non-macro labels remain unchanged.
+
+### Follow-up Task 3: Verify the focused and full pipelines
+
+**Commands:**
+- `nix develop path:. --command python -m unittest tests.test_keymap tests.test_site`
+- `nix flake check --print-build-logs`
+- `git diff --check`
+
+**Acceptance Criteria:**
+- All focused tests and all flake checks pass with fresh output.
+- The diff contains no generated artifacts or changes to canonical Vial data.
