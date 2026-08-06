@@ -8,11 +8,19 @@
 # bd worktree
 .worktrees/keyball-config/
 
+# Nix build result symlinks and build outputs
+/result
+/results/
+
 # Generated keymap diagrams and intermediate site files
 /build/
 
-# Python bytecode caches
+# Python bytecode and test caches
 __pycache__/
 *.py[cod]
+.cache/
+.pytest_cache/
+.mypy_cache/
+
 # bd worktree
 .worktrees/directional-arrow-legends/
