@@ -925,6 +925,8 @@ def _normalize_converter_yaml(
         normalized["k"] = _key_spec(output_keycode, vil)
         normalized["l"] = combo_layers
         normalized["p"] = key_positions
+        if len(key_positions) == 2 and abs(key_positions[0] - key_positions[1]) > 1:
+            normalized["a"] = "bottom"
         normalized_combos.append(normalized)
     if normalized_combos:
         lines.append("combos:")
@@ -1001,8 +1003,8 @@ def _parse_converter_yaml(text: str) -> tuple[dict[str, list[str]], list[dict[st
 
 
 def _validate_converter_combo(combo: Mapping[str, object]) -> None:
-    if set(combo) != {"k", "l", "p"}:
-        raise RenderError("malformed converter combo: expected only k, l, and p")
+    if not set(combo) <= {"k", "l", "p", "d", "dendron", "a", "align"} or {"k", "l", "p"} - set(combo):
+        raise RenderError("malformed converter combo: expected k, l, and p")
     key = combo["k"]
     if isinstance(key, str):
         valid_key = bool(key)
