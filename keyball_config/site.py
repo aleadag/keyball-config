@@ -41,6 +41,7 @@ _SVG_VOCABULARY = {
     "style": set(),
     "g": {"class", "transform"},
     "a": {"href"},
+    "path": {"class", "d"},
     "rect": {"class", "height", "rx", "ry", "width", "x", "y"},
     "text": {"class", "id", "x", "y"},
     "tspan": {"dy", "style", "x"},
